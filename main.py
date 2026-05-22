@@ -9,10 +9,14 @@ from concurrent.futures import (
     as_completed
 )
 
+# =========================
 # 디스코드 웹훅
+# =========================
 WEBHOOK_URL = "https://discord.com/api/webhooks/1507283857643143168/lcTH5vRk94YHIxb0zCf9Q7RJmqb2gse3sPcVsUp9FbnMPrm_pTgs16FnfWFmJY5QLCrf"
 
+# =========================
 # 테마 키워드
+# =========================
 themes = {
     "AI": ["AI", "인공지능"],
     "반도체": ["반도체", "HBM", "엔비디아"],
@@ -23,6 +27,9 @@ themes = {
     "전력": ["전력", "원전"],
 }
 
+# =========================
+# 문자열 정리
+# =========================
 def clean_text(text):
 
     return str(text).replace(
@@ -30,6 +37,9 @@ def clean_text(text):
         ""
     ).lower()
 
+# =========================
+# 시장 접미사
+# =========================
 def get_market_suffix(market):
 
     if "KOSDAQ" in market:
@@ -37,6 +47,9 @@ def get_market_suffix(market):
 
     return ".KS"
 
+# =========================
+# 종목 분석
+# =========================
 def analyze_stock(row):
 
     code = row['Code']
@@ -58,7 +71,9 @@ def analyze_stock(row):
         if len(data) < 40:
             return None
 
+        # =========================
         # 거래량
+        # =========================
         avg_volume = (
             data["Volume"]
             .iloc[-11:-1]
@@ -73,7 +88,9 @@ def analyze_stock(row):
         if avg_volume == 0:
             return None
 
+        # =========================
         # 가격
+        # =========================
         yesterday_close = (
             data["Close"]
             .iloc[-2]
@@ -89,24 +106,30 @@ def analyze_stock(row):
             / yesterday_close
         ) * 100
 
+        # =========================
         # 거래대금
+        # =========================
         trading_value = (
             today_close
             * today_volume
         )
 
-        # 거래대금 필터
+        # 거래대금 100억 이하 제거
         if trading_value < 10000000000:
             return None
 
-        # 20일선
+        # =========================
+        # 20일 이동평균
+        # =========================
         ma20 = (
             data["Close"]
             .tail(20)
             .mean()
         )
 
+        # =========================
         # RSI
+        # =========================
         delta = data['Close'].diff()
 
         up = delta.clip(lower=0)
@@ -134,7 +157,89 @@ def analyze_stock(row):
 
         today_rsi = rsi.iloc[-1]
 
+        # =========================
+        # ATR 계산
+        # =========================
+        data['Prev_Close'] = (
+            data['Close'].shift(1)
+        )
+
+        data['TR1'] = (
+            data['High']
+            - data['Low']
+        )
+
+        data['TR2'] = abs(
+            data['High']
+            - data['Prev_Close']
+        )
+
+        data['TR3'] = abs(
+            data['Low']
+            - data['Prev_Close']
+        )
+
+        data['TR'] = data[
+            ['TR1', 'TR2', 'TR3']
+        ].max(axis=1)
+
+        data['ATR'] = (
+            data['TR']
+            .rolling(window=14)
+            .mean()
+        )
+
+        today_atr = (
+            data['ATR']
+            .iloc[-1]
+        )
+
+        # =========================
+        # 최근 지지/저항
+        # =========================
+        high_20d = (
+            data['High']
+            .tail(20)
+            .max()
+        )
+
+        low_20d = (
+            data['Low']
+            .tail(20)
+            .min()
+        )
+
+        # =========================
+        # 진입/익절/손절
+        # =========================
+        entry_price = int(
+            today_close
+        )
+
+        if today_close >= high_20d * 0.98:
+
+            target_price = int(
+                today_close
+                + (today_atr * 2)
+            )
+
+        else:
+
+            target_price = int(
+                high_20d
+            )
+
+        stop_loss = int(
+            max(
+                today_close
+                - (today_atr * 1.5),
+                low_20d
+            )
+        )
+
+        # =========================
         # 추천 조건
+        # =========================
         if (
             today_volume > avg_volume * 1.1
             and change_percent > 2
@@ -142,7 +247,9 @@ def analyze_stock(row):
             and today_rsi < 75
         ):
 
+            # =========================
             # 뉴스
+            # =========================
             news_url = (
                 f"https://news.google.com/rss/search?"
                 f"q={name}+주식&hl=ko&gl=KR&ceid=KR:ko"
@@ -160,7 +267,7 @@ def analyze_stock(row):
 
                 title = item.title
 
-                # 중복 제거
+                # 뉴스 중복 제거
                 if title in news_titles:
                     continue
 
@@ -185,7 +292,9 @@ def analyze_stock(row):
                                 theme
                             )
 
+            # =========================
             # 추천 점수
+            # =========================
             score = 0
 
             # 거래량 점수
@@ -237,12 +346,18 @@ def analyze_stock(row):
                 "trading_value": int(
                     trading_value
                     / 100000000
-                )
+                ),
+                "entry_price": entry_price,
+                "target_price": target_price,
+                "stop_loss": stop_loss
             }
 
     except:
         return None
 
+# =========================
+# 디스코드 메시지
+# =========================
 def send_discord_message(message):
 
     data = {
@@ -254,6 +369,9 @@ def send_discord_message(message):
         json=data
     )
 
+# =========================
+# 메인 실행
+# =========================
 def main():
 
     print("🚀 종목 분석 시작")
@@ -289,7 +407,9 @@ def main():
             if result:
                 results.append(result)
 
-    # 점수순 정렬
+    # =========================
+    # 점수 정렬
+    # =========================
     results = sorted(
         results,
         key=lambda x: x['score'],
@@ -299,7 +419,9 @@ def main():
     # 상위 5개
     top_results = results[:5]
 
+    # =========================
     # 결과 없으면
+    # =========================
     if not top_results:
 
         send_discord_message(
@@ -308,7 +430,9 @@ def main():
 
         return
 
+    # =========================
     # 시장 테마 분석
+    # =========================
     all_themes = []
 
     for stock in top_results:
@@ -332,7 +456,9 @@ def main():
         reverse=True
     )
 
+    # =========================
     # 테마 메시지
+    # =========================
     theme_message = (
         "🔥 오늘 강한 테마\n\n"
     )
@@ -350,7 +476,9 @@ def main():
 
     time.sleep(1)
 
+    # =========================
     # 종목 메시지
+    # =========================
     for stock in top_results:
 
         message = (
@@ -368,6 +496,15 @@ def main():
 
             f"💰 거래대금: "
             f"{stock['trading_value']}억\n\n"
+
+            f"🎯 진입가: "
+            f"{stock['entry_price']:,}원\n"
+
+            f"🚀 목표가: "
+            f"{stock['target_price']:,}원\n"
+
+            f"🛑 손절가: "
+            f"{stock['stop_loss']:,}원\n\n"
 
             f"🏷️ 테마:\n"
         )
@@ -394,6 +531,9 @@ def main():
 
         time.sleep(1)
 
+# =========================
+# 실행
+# =========================
 if __name__ == "__main__":
 
     main()
