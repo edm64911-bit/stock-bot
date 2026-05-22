@@ -3,6 +3,7 @@ import yfinance as yf
 import feedparser
 import requests
 import time
+import math
 
 from concurrent.futures import (
     ThreadPoolExecutor,
@@ -38,7 +39,7 @@ def clean_text(text):
     ).lower()
 
 # =========================
-# 시장 접미사
+# 시장 코드
 # =========================
 def get_market_suffix(market):
 
@@ -48,25 +49,46 @@ def get_market_suffix(market):
     return ".KS"
 
 # =========================
+# 디스코드 전송
+# =========================
+def send_discord_message(message):
+
+    data = {
+        "content": message
+    }
+
+    requests.post(
+        WEBHOOK_URL,
+        json=data
+    )
+
+# =========================
 # 종목 분석
 # =========================
 def analyze_stock(row):
 
-    code = row['Code']
-    name = row['Name']
-    market = row['Market']
-
-    ticker_code = (
-        code + get_market_suffix(market)
-    )
-
     try:
+
+        code = row['Code']
+        name = row['Name']
+        market = row['Market']
+
+        ticker_code = (
+            code + get_market_suffix(market)
+        )
 
         ticker = yf.Ticker(ticker_code)
 
         data = ticker.history(
             period="6mo"
         )
+
+        # 데이터 부족
+        if len(data) < 40:
+            return None
+
+        # NaN 제거
+        data = data.dropna()
 
         if len(data) < 40:
             return None
@@ -101,10 +123,35 @@ def analyze_stock(row):
             .iloc[-1]
         )
 
+        # 가격 이상치 방지
+        if (
+            yesterday_close <= 0
+            or today_close <= 0
+        ):
+            return None
+
+        # =========================
+        # 등락률
+        # =========================
         change_percent = (
-            (today_close - yesterday_close)
+            (
+                today_close
+                - yesterday_close
+            )
             / yesterday_close
         ) * 100
+
+        # NaN 방지
+        if (
+            math.isnan(change_percent)
+            or math.isinf(change_percent)
+        ):
+            return None
+
+        change_percent = round(
+            change_percent,
+            2
+        )
 
         # =========================
         # 거래대금
@@ -152,10 +199,20 @@ def analyze_stock(row):
         rs = ema_up / ema_down
 
         rsi = (
-            100 - (100 / (1 + rs))
+            100
+            - (100 / (1 + rs))
         )
 
-        today_rsi = rsi.iloc[-1]
+        today_rsi = (
+            rsi.iloc[-1]
+        )
+
+        # RSI 오류 방지
+        if (
+            math.isnan(today_rsi)
+            or math.isinf(today_rsi)
+        ):
+            return None
 
         # =========================
         # ATR 계산
@@ -194,8 +251,14 @@ def analyze_stock(row):
             .iloc[-1]
         )
 
+        if (
+            math.isnan(today_atr)
+            or math.isinf(today_atr)
+        ):
+            return None
+
         # =========================
-        # 최근 지지/저항
+        # 최근 고점/저점
         # =========================
         high_20d = (
             data['High']
@@ -210,13 +273,16 @@ def analyze_stock(row):
         )
 
         # =========================
-        # 진입/익절/손절
+        # 진입/목표/손절
         # =========================
         entry_price = int(
             today_close
         )
 
-        if today_close >= high_20d * 0.98:
+        if (
+            today_close
+            >= high_20d * 0.98
+        ):
 
             target_price = int(
                 today_close
@@ -248,7 +314,7 @@ def analyze_stock(row):
         ):
 
             # =========================
-            # 뉴스
+            # 뉴스 가져오기
             # =========================
             news_url = (
                 f"https://news.google.com/rss/search?"
@@ -267,7 +333,6 @@ def analyze_stock(row):
 
                 title = item.title
 
-                # 뉴스 중복 제거
                 if title in news_titles:
                     continue
 
@@ -275,7 +340,9 @@ def analyze_stock(row):
 
                 cleaned = clean_text(title)
 
+                # =========================
                 # 테마 분석
+                # =========================
                 for (
                     theme,
                     keywords
@@ -298,7 +365,10 @@ def analyze_stock(row):
             score = 0
 
             # 거래량 점수
-            if today_volume > avg_volume * 1.5:
+            if (
+                today_volume
+                > avg_volume * 1.5
+            ):
                 score += 3
             else:
                 score += 1
@@ -312,7 +382,10 @@ def analyze_stock(row):
                 score += 1
 
             # 거래대금 점수
-            if trading_value > 50000000000:
+            if (
+                trading_value
+                > 50000000000
+            ):
                 score += 3
 
             # RSI 점수
@@ -328,46 +401,42 @@ def analyze_stock(row):
                 score += 2
 
             return {
+
                 "name": name,
+
                 "score": score,
-                "change": round(
-                    change_percent,
-                    2
-                ),
+
+                "change": change_percent,
+
                 "volume": int(
                     today_volume
                     / avg_volume
                     * 100
                 ),
+
                 "themes": list(
                     detected_themes
                 ),
+
                 "news": news_titles[:3],
+
                 "trading_value": int(
                     trading_value
                     / 100000000
                 ),
+
                 "entry_price": entry_price,
+
                 "target_price": target_price,
+
                 "stop_loss": stop_loss
             }
 
-    except:
+    except Exception as e:
+
+        print("오류:", e)
+
         return None
-
-# =========================
-# 디스코드 메시지
-# =========================
-def send_discord_message(message):
-
-    data = {
-        "content": message
-    }
-
-    requests.post(
-        WEBHOOK_URL,
-        json=data
-    )
 
 # =========================
 # 메인 실행
@@ -408,7 +477,7 @@ def main():
                 results.append(result)
 
     # =========================
-    # 점수 정렬
+    # 점수순 정렬
     # =========================
     results = sorted(
         results,
@@ -420,7 +489,7 @@ def main():
     top_results = results[:5]
 
     # =========================
-    # 결과 없으면
+    # 추천 종목 없을 때
     # =========================
     if not top_results:
 
@@ -463,7 +532,10 @@ def main():
         "🔥 오늘 강한 테마\n\n"
     )
 
-    for theme, count in sorted_themes:
+    for (
+        theme,
+        count
+    ) in sorted_themes:
 
         theme_message += (
             f"- {theme} "
@@ -482,6 +554,7 @@ def main():
     for stock in top_results:
 
         message = (
+
             f"🔥 추천 종목: "
             f"{stock['name']}\n\n"
 
