@@ -3,7 +3,6 @@ name: Stock Bot
 on:
 
   schedule:
-
     - cron: '0 0,3,6,9,12 * * *'
 
   workflow_dispatch:
@@ -33,7 +32,6 @@ jobs:
         run: |
 
           pip install finance-datareader
-          pip install yfinance
           pip install feedparser
           pip install requests
           pip install pandas
