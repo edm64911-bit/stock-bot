@@ -1,15 +1,9 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v2.2
+  초기 수급 탐지 스캐너 v2.4
   변경사항:
-    - 거래량 필터 1.8배 → 1.3배 완화
-    - MA20 하드컷 제거 → 점수제 전환
-    - RSI 상한 70 → 75 완화
-    - 5일 급등 제외 15% → 20% 완화
-    - 데이터 최소 60일 → 30일 완화
-    - 배율/RSI/거래대금 구간별 차등 점수 추가
-    - 최소 점수 컷 3점 추가
-    - Discord 메시지 MA20 위/아래 표시 추가
+    - 윗꼬리음봉 하드컷 제거 → 감점(-2)으로 전환
+    - tracker.py 연동: 진입 종목 positions.json 저장
 ===================================================
 """
 
@@ -37,18 +31,14 @@ def is_market_open() -> bool:
     kst_minute = now.minute
     kst_time   = kst_hour * 100 + kst_minute
     weekday    = now.weekday()
-
     if weekday >= 5:
         return False
-
     return 900 <= kst_time <= 1530
-
 
 # ==================================================
 # 로깅 설정
 # ==================================================
 LOG_FILE = f"scanner_{datetime.now().strftime('%Y%m%d')}.log"
-
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.ERROR,
@@ -80,7 +70,7 @@ THEMES = {
 }
 
 # ==================================================
-# 섹터 ETF (모멘텀 필터용)
+# 섹터 ETF
 # ==================================================
 SECTOR_ETFS = {
     "반도체":  "091160",
@@ -90,44 +80,24 @@ SECTOR_ETFS = {
     "방산":    "425810",
 }
 
-# ==================================================
-# 결과 저장 Lock (스레드 안전)
-# ==================================================
 results_lock = Lock()
 
-# ==================================================
-# 문자열 정리
-# ==================================================
 def clean_text(text: str) -> str:
     return str(text).replace(" ", "").lower()
 
-# ==================================================
-# 디스코드 메시지 전송
-# ==================================================
 def send_discord_message(message: str) -> None:
     if not WEBHOOK_URL:
-        print("[Discord] WEBHOOK_URL 미설정 — 콘솔 출력:\n", message)
+        print("[Discord] WEBHOOK_URL 미설정\n", message)
         return
     try:
-        resp = requests.post(
-            WEBHOOK_URL,
-            json={"content": message},
-            timeout=10
-        )
+        resp = requests.post(WEBHOOK_URL, json={"content": message}, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        logging.error(f"Discord 전송 오류: {e}")
-        print("디스코드 오류:", e)
+        logging.error(f"Discord 오류: {e}")
 
-# ==================================================
-# 디스코드 에러 알림
-# ==================================================
 def send_discord_error(msg: str) -> None:
     send_discord_message(f"⚠️ [스캐너 오류] {msg}")
 
-# ==================================================
-# RSI (Wilder's Smoothing 방식)
-# ==================================================
 def calculate_rsi(close: pd.Series, period: int = 14) -> float:
     delta    = close.diff()
     gain     = delta.where(delta > 0, 0.0)
@@ -138,51 +108,47 @@ def calculate_rsi(close: pd.Series, period: int = 14) -> float:
     rsi      = 100 - (100 / (1 + rs))
     return round(float(rsi.iloc[-1]), 2)
 
-# ==================================================
-# ATR
-# ==================================================
 def calculate_atr(data: pd.DataFrame, period: int = 14) -> float:
     high_low   = data["High"] - data["Low"]
     high_close = (data["High"] - data["Close"].shift()).abs()
     low_close  = (data["Low"]  - data["Close"].shift()).abs()
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr        = true_range.rolling(period).mean()
-    return float(atr.iloc[-1])
+    return float(true_range.rolling(period).mean().iloc[-1])
 
-# ==================================================
-# 52주 신고가 근접 여부
-# ==================================================
+def check_candle_pattern(data: pd.DataFrame) -> str:
+    today      = data.iloc[-1]
+    op, hi, lo, cl = float(today["Open"]), float(today["High"]), float(today["Low"]), float(today["Close"])
+    total      = hi - lo
+    if total == 0:
+        return "보통"
+    body       = abs(cl - op)
+    upper_wick = hi - max(cl, op)
+    lower_wick = min(cl, op) - lo
+    if body / total > 0.7 and cl > op and upper_wick / total < 0.1:
+        return "장대양봉"
+    if lower_wick / total > 0.4 and cl > op:
+        return "아랫꼬리양봉"
+    if upper_wick / total > 0.4 and cl < op:
+        return "윗꼬리음봉"
+    return "보통"
+
 def is_near_52w_high(data: pd.DataFrame, threshold: float = 0.90) -> bool:
-    high_52w    = data["Close"].tail(252).max()
-    today_close = data["Close"].iloc[-1]
-    return (today_close / high_52w) >= threshold
+    return (data["Close"].iloc[-1] / data["Close"].tail(252).max()) >= threshold
 
-# ==================================================
-# 거래량 급등 + 눌림 패턴
-# ==================================================
 def check_volume_consolidation(data: pd.DataFrame) -> bool:
-    recent      = data.tail(5)
-    top2_idx    = recent["Volume"].nlargest(2).index
-    avg_price   = recent.loc[top2_idx, "Close"].mean()
-    today_close = data["Close"].iloc[-1]
+    recent    = data.tail(5)
+    top2_idx  = recent["Volume"].nlargest(2).index
+    avg_price = recent.loc[top2_idx, "Close"].mean()
     if avg_price <= 0:
         return False
-    return (today_close / avg_price) >= 0.97
+    return (data["Close"].iloc[-1] / avg_price) >= 0.97
 
-# ==================================================
-# 상대강도 (vs KOSPI 5일)
-# ==================================================
-def get_relative_strength(stock_5d_change: float, kospi_data) -> float:
+def get_relative_strength(stock_5d: float, kospi_data) -> float:
     if kospi_data is None or len(kospi_data) < 6:
         return 0.0
-    kospi_5d = (
-        (kospi_data["Close"].iloc[-1] / kospi_data["Close"].iloc[-5]) - 1
-    ) * 100
-    return round(stock_5d_change - kospi_5d, 2)
+    kospi_5d = ((kospi_data["Close"].iloc[-1] / kospi_data["Close"].iloc[-5]) - 1) * 100
+    return round(stock_5d - kospi_5d, 2)
 
-# ==================================================
-# 외국인/기관 순매수 (최근 3일)
-# ==================================================
 def get_investor_sentiment(code: str) -> dict:
     try:
         start = (TODAY - timedelta(days=10)).strftime("%Y-%m-%d")
@@ -196,9 +162,6 @@ def get_investor_sentiment(code: str) -> dict:
     except Exception:
         return {"foreign": 0, "institution": 0}
 
-# ==================================================
-# 섹터 ETF 모멘텀 (MA20 위에 있는지)
-# ==================================================
 def is_sector_etf_bullish(themes: list, etf_cache: dict) -> bool:
     if not themes:
         return True
@@ -207,15 +170,10 @@ def is_sector_etf_bullish(themes: list, etf_cache: dict) -> bool:
         if etf_code and etf_code in etf_cache:
             etf_data = etf_cache[etf_code]
             if len(etf_data) >= 20:
-                ma20      = etf_data["Close"].tail(20).mean()
-                etf_close = etf_data["Close"].iloc[-1]
-                if etf_close >= ma20:
+                if etf_data["Close"].iloc[-1] >= etf_data["Close"].tail(20).mean():
                     return True
     return False
 
-# ==================================================
-# 섹터 ETF 사전 로딩
-# ==================================================
 def load_etf_cache() -> dict:
     cache = {}
     for theme, code in SECTOR_ETFS.items():
@@ -228,15 +186,9 @@ def load_etf_cache() -> dict:
     print(f"  ETF 캐시 로딩 완료: {list(cache.keys())}")
     return cache
 
-# ==================================================
-# 뉴스 분석
-# ==================================================
 def analyze_news(name: str) -> tuple:
     try:
-        url      = (
-            f"https://news.google.com/rss/search?"
-            f"q={name}+주식&hl=ko&gl=KR&ceid=KR:ko"
-        )
+        url      = f"https://news.google.com/rss/search?q={name}+주식&hl=ko&gl=KR&ceid=KR:ko"
         feed     = feedparser.parse(url)
         titles   = []
         detected = set()
@@ -249,65 +201,67 @@ def analyze_news(name: str) -> tuple:
                     detected.add(theme)
         return titles, list(detected)
     except Exception as e:
-        logging.error(f"뉴스 파싱 오류 [{name}]: {e}")
+        logging.error(f"뉴스 오류 [{name}]: {e}")
         return [], []
 
-# ==================================================
-# 종목 분석
-# ==================================================
 def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
     code = row["Code"]
     name = row["Name"]
-
     try:
-        # 기본 필터
         if "ETF" in name or name.endswith("우"):
             return None
-        if row["Marcap"] > 15_000_000_000_000:
+        if row["Marcap"] > 5_000_000_000_000:
             return None
 
-        # 데이터 로딩
         data = fdr.DataReader(code, START_DATE)
         data = data.dropna()
-
-        if len(data) < 30:              # 완화: 60일 → 30일
+        if len(data) < 30:
             return None
 
         today_close     = float(data["Close"].iloc[-1])
         yesterday_close = float(data["Close"].iloc[-2])
-
         if today_close <= 0 or yesterday_close <= 0:
             return None
 
         change_pct      = (today_close - yesterday_close) / yesterday_close * 100
         five_day_change = (today_close - data["Close"].iloc[-5]) / data["Close"].iloc[-5] * 100
-
-        if five_day_change > 20:        # 완화: 15% → 20%
+        if five_day_change > 20:
             return None
 
         avg_volume   = data["Volume"].iloc[-11:-1].mean()
         today_volume = float(data["Volume"].iloc[-1])
-
         if avg_volume <= 0:
             return None
 
         volume_ratio  = today_volume / avg_volume
         trading_value = today_close * today_volume
-
-        if volume_ratio < 1.3:          # 완화: 1.8배 → 1.3배
+        if volume_ratio < 1.3:
             return None
-
         if trading_value < 3_000_000_000:
             return None
 
         today_rsi = calculate_rsi(data["Close"])
-        if today_rsi > 75:              # 완화: 70 → 75
+        if today_rsi > 75:
             return None
 
         ma20       = float(data["Close"].tail(20).mean())
-        above_ma20 = today_close >= ma20  # 하드컷 제거 → 점수로만 반영
+        above_ma20 = today_close >= ma20
+        today_atr  = calculate_atr(data)
+        candle     = check_candle_pattern(data)
 
-        today_atr         = calculate_atr(data)
+        entry_price    = int(today_close)
+        stop_loss      = int(today_close - today_atr)
+        target_price_1 = int(today_close + today_atr * 1.5)
+        target_price_2 = int(today_close + today_atr * 2.0)
+
+        risk   = entry_price - stop_loss
+        reward = target_price_2 - entry_price
+        if risk <= 0:
+            return None
+        rr_ratio = round(reward / risk, 2)
+        if rr_ratio < 2.0:
+            return None
+
         near_52w_high     = is_near_52w_high(data)
         vol_consolidation = check_volume_consolidation(data)
         relative_strength = get_relative_strength(five_day_change, kospi_data)
@@ -315,77 +269,34 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
         news_titles, detected_themes = analyze_news(name)
         sector_bullish    = is_sector_etf_bullish(detected_themes, etf_cache)
 
-        entry_price  = int(today_close)
-        target_price = int(today_close + today_atr * 1.5)
-        stop_loss    = int(today_close - today_atr)
-
-        # 점수 계산
         score = 0
-
-        # 거래량 배율 (구간별 차등)
-        if volume_ratio > 3:
-            score += 5
-        elif volume_ratio > 2:
-            score += 3
-        elif volume_ratio > 1.5:
-            score += 1
-
-        # 당일 상승률
-        if 0 < change_pct < 5:
-            score += 3
-        elif change_pct >= 5:
-            score += 1
-
-        # RSI (구간별 차등)
-        if today_rsi < 60:
-            score += 2
-        elif today_rsi < 70:
-            score += 1
-
-        # 거래대금 (구간별 차등)
-        if trading_value > 10_000_000_000:
-            score += 3
-        elif trading_value > 5_000_000_000:
-            score += 1
-
-        # 테마
+        if volume_ratio > 3:       score += 5
+        elif volume_ratio > 2:     score += 3
+        elif volume_ratio > 1.5:   score += 1
+        if 0 < change_pct < 5:     score += 3
+        elif change_pct >= 5:      score += 1
+        if today_rsi < 60:         score += 2
+        elif today_rsi < 70:       score += 1
+        if trading_value > 10_000_000_000:   score += 3
+        elif trading_value > 5_000_000_000:  score += 1
         score += len(detected_themes) * 2
+        if near_52w_high:          score += 3
+        if vol_consolidation:      score += 2
+        if above_ma20:             score += 2
+        else:                      score -= 1
+        if relative_strength > 5:  score += 3
+        elif relative_strength > 2:score += 1
+        if investor["foreign"] > 0:    score += 3
+        if investor["institution"] > 0:score += 2
+        if not sector_bullish:     score -= 3
+        if candle == "장대양봉":       score += 3
+        elif candle == "아랫꼬리양봉": score += 2
+        elif candle == "윗꼬리음봉":   score -= 2  # 하드컷 제거 → 감점으로
 
-        # 52주 신고가 근접
-        if near_52w_high:
-            score += 3
-
-        # 거래량 눌림 패턴
-        if vol_consolidation:
-            score += 2
-
-        # MA20 위/아래 (점수로 반영)
-        if above_ma20:
-            score += 2
-        else:
-            score -= 1
-
-        # 상대강도
-        if relative_strength > 5:
-            score += 3
-        elif relative_strength > 2:
-            score += 1
-
-        # 외국인/기관 수급
-        if investor["foreign"] > 0:
-            score += 3
-        if investor["institution"] > 0:
-            score += 2
-
-        # 섹터 ETF 역행 감점
-        if not sector_bullish:
-            score -= 3
-
-        # 최소 점수 컷
         if score < 3:
             return None
 
-        print(f"  ✅ {name} | 점수:{score} | RSI:{today_rsi} | 거래량:{volume_ratio:.1f}배 | MA20:{'위' if above_ma20 else '아래'}")
+        print(f"  ✅ {name} | 점수:{score} | RSI:{today_rsi} | 거래량:{volume_ratio:.1f}배 | 캔들:{candle} | RR:1:{rr_ratio}")
 
         return {
             "name":              name,
@@ -403,11 +314,14 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
             "foreign_net":       investor["foreign"],
             "institution_net":   investor["institution"],
             "sector_bullish":    sector_bullish,
+            "candle":            candle,
+            "rr_ratio":          rr_ratio,
             "themes":            detected_themes,
             "news":              news_titles,
             "entry_price":       entry_price,
-            "target_price":      target_price,
             "stop_loss":         stop_loss,
+            "target_price_1":    target_price_1,
+            "target_price_2":    target_price_2,
             "scanned_at":        TODAY.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -417,22 +331,59 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
             send_discord_error(f"연결 오류 [{name}]")
         return None
 
-# ==================================================
-# 결과 JSON 저장 (백테스트용)
-# ==================================================
 def save_results(results: list) -> None:
     filename = f"scan_{TODAY.strftime('%Y%m%d_%H%M')}.json"
     try:
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
-        print(f"\n  💾 결과 저장: {filename}")
+        print(f"\n  💾 스캔 결과 저장: {filename}")
     except Exception as e:
         logging.error(f"결과 저장 실패: {e}")
 
 # ==================================================
-# Discord 포맷
+# tracker.py 연동: positions.json에 진입 종목 추가
 # ==================================================
-def format_discord_message(stock: dict) -> str:
+def save_positions(top_results: list) -> None:
+    filename = "positions.json"
+    try:
+        # 기존 포지션 로드
+        if os.path.exists(filename):
+            with open(filename, "r", encoding="utf-8") as f:
+                positions = json.load(f)
+        else:
+            positions = []
+
+        existing_codes = {p["code"] for p in positions}
+
+        for stock in top_results:
+            if stock["code"] in existing_codes:
+                continue  # 이미 추적 중인 종목 스킵
+            positions.append({
+                "code":          stock["code"],
+                "name":          stock["name"],
+                "entry_price":   stock["entry_price"],
+                "stop_loss":     stock["stop_loss"],
+                "target_price_1":stock["target_price_1"],
+                "target_price_2":stock["target_price_2"],
+                "entered_at":    TODAY.strftime("%Y-%m-%d %H:%M:%S"),
+                "status":        "진행중",   # 진행중 / 1차도달 / 2차도달 / 손절
+                "result":        None,
+            })
+
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(positions, f, ensure_ascii=False, indent=2)
+        print(f"  📌 포지션 저장: {filename} ({len(positions)}개 추적 중)")
+    except Exception as e:
+        logging.error(f"포지션 저장 실패: {e}")
+
+def format_discord_message(stock: dict, rank: int) -> str:
+    candle_emoji = {
+        "장대양봉":    "🕯️ 장대양봉",
+        "아랫꼬리양봉":"📌 아랫꼬리양봉",
+        "윗꼬리음봉":  "⚠️ 윗꼬리음봉",
+        "보통":        "➖ 보통",
+    }.get(stock["candle"], "➖ 보통")
+
     flags = " ".join(filter(None, [
         "🔑 신고가 근접"                              if stock["near_52w_high"]         else "",
         "🧱 눌림 패턴"                                if stock["vol_consolidation"]      else "",
@@ -442,9 +393,10 @@ def format_discord_message(stock: dict) -> str:
     ]))
 
     msg = (
-        f"🚨 초기 수급 감지\n\n"
+        f"🚨 수급 감지 #{rank}\n\n"
         f"🔥 종목: {stock['name']} ({stock['code']})\n\n"
         f"⭐ 점수: {stock['score']}점\n"
+        f"{candle_emoji}\n"
         f"{flags}\n\n"
         f"📈 당일 상승률:  {stock['change']}%\n"
         f"📊 5일 상승률:   {stock['five_day_change']}%\n"
@@ -454,25 +406,23 @@ def format_discord_message(stock: dict) -> str:
         f"🌐 상대강도:     {stock['relative_strength']:+.1f}%\n"
         f"👥 외국인 3일:   {stock['foreign_net']:+,}주\n"
         f"🏦 기관 3일:     {stock['institution_net']:+,}주\n\n"
-        f"🎯 진입가:  {stock['entry_price']:,}원\n"
-        f"🚀 목표가:  {stock['target_price']:,}원\n"
-        f"🛑 손절가:  {stock['stop_loss']:,}원\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 진입가:    {stock['entry_price']:,}원\n"
+        f"🚀 1차 목표:  {stock['target_price_1']:,}원  → 절반 청산 후 손절을 본전으로\n"
+        f"🚀 2차 목표:  {stock['target_price_2']:,}원  → 나머지 전량 청산\n"
+        f"🛑 손절가:    {stock['stop_loss']:,}원  (절대 불변)\n"
+        f"📐 RR:        1 : {stock['rr_ratio']}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
     )
 
     if stock["themes"]:
         msg += "\n🏷️ 테마\n" + "\n".join(f"  - {t}" for t in stock["themes"])
-
     if stock["news"]:
         msg += "\n\n📰 뉴스\n" + "\n".join(f"  • {n}" for n in stock["news"])
 
     return msg
 
-# ==================================================
-# 메인
-# ==================================================
 def main() -> None:
-
-    # ① 장 시간 체크
     if not is_market_open():
         now_utc = datetime.utcnow()
         kst_h   = (now_utc.hour + 9) % 24
@@ -482,11 +432,10 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v2.2")
+    print(f"🚀 초기 수급 탐지 스캐너 v2.4")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
-    # ② KOSPI 로딩
     print("\n📊 KOSPI 데이터 로딩 중...")
     try:
         kospi_data = fdr.DataReader("KS11", START_DATE)
@@ -495,21 +444,17 @@ def main() -> None:
         kospi_data = None
         print("  ⚠️ KOSPI 로딩 실패 — 상대강도 생략")
 
-    # ③ 섹터 ETF 캐시
     print("\n📦 섹터 ETF 로딩 중...")
     etf_cache = load_etf_cache()
 
-    # ④ 종목 리스트
     print("\n📋 KRX 종목 로딩 중...")
     stocks = fdr.StockListing("KRX")
     stocks = stocks[stocks["Market"].isin(["KOSPI", "KOSDAQ"])]
     stocks = stocks[stocks["Marcap"] > 50_000_000_000]
-    stocks = stocks.sort_values(by="Marcap", ascending=False).head(200)
+    stocks = stocks.sort_values(by="Marcap", ascending=False).head(400)
     print(f"  분석 대상: {len(stocks)}개\n")
 
     results = []
-
-    # ⑤ 멀티스레드 분석
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {
             executor.submit(analyze_stock, row, kospi_data, etf_cache): row["Name"]
@@ -522,26 +467,24 @@ def main() -> None:
                     results.append(result)
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    top_results = results[:5]
+    top_results = results[:10]
 
     elapsed = round(time.time() - start_time, 1)
     print(f"\n{'='*50}")
     print(f"  최종 후보: {len(results)}개 | 소요: {elapsed}초")
     print(f"{'='*50}\n")
 
-    # ⑥ 결과 없음
     if not top_results:
         msg = f"❌ 수급 감지 종목 없음 (스캔완료 {elapsed}초)"
         print(msg)
         send_discord_message(msg)
         return
 
-    # ⑦ JSON 저장
     save_results(results)
+    save_positions(top_results)   # tracker 연동
 
-    # ⑧ Discord 전송
-    for stock in top_results:
-        message = format_discord_message(stock)
+    for rank, stock in enumerate(top_results, start=1):
+        message = format_discord_message(stock, rank)
         print(message)
         print("-" * 40)
         send_discord_message(message)
@@ -549,9 +492,5 @@ def main() -> None:
 
     print(f"\n✅ 완료 | 소요: {elapsed}초")
 
-
-# ==================================================
-# 실행
-# ==================================================
 if __name__ == "__main__":
     main()
