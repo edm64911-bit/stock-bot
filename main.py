@@ -1,20 +1,15 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v2.1
+  초기 수급 탐지 스캐너 v2.2
   변경사항:
-    - RSI: rolling mean → Wilder's EWM 방식으로 수정
-    - 상대강도(vs KOSPI) 추가
-    - 52주 신고가 근접 여부 추가
-    - 외국인/기관 순매수 방향 추가
-    - 섹터 ETF 모멘텀 필터 추가
-    - 거래량 급등 + 눌림 패턴 추가
-    - 에러 로깅: 콘솔 + 파일 + Discord
-    - 결과 JSON 저장 (백테스트용)
-    - 하드코딩 날짜 → 동적 처리
-    - list.append() 스레드 안전성 → Lock 적용
-    - 실행 시간 측정
-    - 장 시간 체크 추가 (KST 09:00~15:30 평일만)
-    - 장 외 시간 실행 시 즉시 종료
+    - 거래량 필터 1.8배 → 1.3배 완화
+    - MA20 하드컷 제거 → 점수제 전환
+    - RSI 상한 70 → 75 완화
+    - 5일 급등 제외 15% → 20% 완화
+    - 데이터 최소 60일 → 30일 완화
+    - 배율/RSI/거래대금 구간별 차등 점수 추가
+    - 최소 점수 컷 3점 추가
+    - Discord 메시지 MA20 위/아래 표시 추가
 ===================================================
 """
 
@@ -40,8 +35,8 @@ def is_market_open() -> bool:
     now        = datetime.utcnow()
     kst_hour   = (now.hour + 9) % 24
     kst_minute = now.minute
-    kst_time   = kst_hour * 100 + kst_minute  # 예: 930 = 09:30
-    weekday    = now.weekday()                 # 0=월 ~ 6=일
+    kst_time   = kst_hour * 100 + kst_minute
+    weekday    = now.weekday()
 
     if weekday >= 5:
         return False
@@ -88,11 +83,11 @@ THEMES = {
 # 섹터 ETF (모멘텀 필터용)
 # ==================================================
 SECTOR_ETFS = {
-    "반도체":  "091160",  # KODEX 반도체
-    "2차전지": "305720",  # KODEX 2차전지산업
-    "바이오":  "244580",  # KODEX 바이오
-    "AI":      "379800",  # KODEX 미국S&P500
-    "방산":    "425810",  # KODEX K-방산
+    "반도체":  "091160",
+    "2차전지": "305720",
+    "바이오":  "244580",
+    "AI":      "379800",
+    "방산":    "425810",
 }
 
 # ==================================================
@@ -177,10 +172,7 @@ def check_volume_consolidation(data: pd.DataFrame) -> bool:
 # ==================================================
 # 상대강도 (vs KOSPI 5일)
 # ==================================================
-def get_relative_strength(
-    stock_5d_change: float,
-    kospi_data: pd.DataFrame
-) -> float:
+def get_relative_strength(stock_5d_change: float, kospi_data) -> float:
     if kospi_data is None or len(kospi_data) < 6:
         return 0.0
     kospi_5d = (
@@ -241,7 +233,7 @@ def load_etf_cache() -> dict:
 # ==================================================
 def analyze_news(name: str) -> tuple:
     try:
-        url  = (
+        url      = (
             f"https://news.google.com/rss/search?"
             f"q={name}+주식&hl=ko&gl=KR&ceid=KR:ko"
         )
@@ -278,7 +270,7 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
         data = fdr.DataReader(code, START_DATE)
         data = data.dropna()
 
-        if len(data) < 60:
+        if len(data) < 30:              # 완화: 60일 → 30일
             return None
 
         today_close     = float(data["Close"].iloc[-1])
@@ -287,64 +279,42 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
         if today_close <= 0 or yesterday_close <= 0:
             return None
 
-        # 등락률
-        change_pct = (today_close - yesterday_close) / yesterday_close * 100
+        change_pct      = (today_close - yesterday_close) / yesterday_close * 100
+        five_day_change = (today_close - data["Close"].iloc[-5]) / data["Close"].iloc[-5] * 100
 
-        # 5일 상승률
-        five_day_change = (
-            (today_close - data["Close"].iloc[-5]) / data["Close"].iloc[-5] * 100
-        )
-        if five_day_change > 15:
+        if five_day_change > 20:        # 완화: 15% → 20%
             return None
 
-        # 거래량
         avg_volume   = data["Volume"].iloc[-11:-1].mean()
         today_volume = float(data["Volume"].iloc[-1])
 
         if avg_volume <= 0:
             return None
 
-        volume_ratio = today_volume / avg_volume
-        if volume_ratio < 1.8:
+        volume_ratio  = today_volume / avg_volume
+        trading_value = today_close * today_volume
+
+        if volume_ratio < 1.3:          # 완화: 1.8배 → 1.3배
             return None
 
-        # 거래대금
-        trading_value = today_close * today_volume
         if trading_value < 3_000_000_000:
             return None
 
-        # RSI
         today_rsi = calculate_rsi(data["Close"])
-        if today_rsi > 70:
+        if today_rsi > 75:              # 완화: 70 → 75
             return None
 
-        # MA20
-        ma20 = float(data["Close"].tail(20).mean())
-        if today_close < ma20:
-            return None
+        ma20       = float(data["Close"].tail(20).mean())
+        above_ma20 = today_close >= ma20  # 하드컷 제거 → 점수로만 반영
 
-        # ATR
-        today_atr = calculate_atr(data)
-
-        # 52주 신고가 근접
-        near_52w_high = is_near_52w_high(data)
-
-        # 거래량 눌림 패턴
+        today_atr         = calculate_atr(data)
+        near_52w_high     = is_near_52w_high(data)
         vol_consolidation = check_volume_consolidation(data)
-
-        # 상대강도
         relative_strength = get_relative_strength(five_day_change, kospi_data)
-
-        # 외국인/기관
-        investor = get_investor_sentiment(code)
-
-        # 뉴스 + 테마
+        investor          = get_investor_sentiment(code)
         news_titles, detected_themes = analyze_news(name)
+        sector_bullish    = is_sector_etf_bullish(detected_themes, etf_cache)
 
-        # 섹터 ETF 모멘텀
-        sector_bullish = is_sector_etf_bullish(detected_themes, etf_cache)
-
-        # 진입 / 목표 / 손절
         entry_price  = int(today_close)
         target_price = int(today_close + today_atr * 1.5)
         stop_loss    = int(today_close - today_atr)
@@ -352,43 +322,70 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
         # 점수 계산
         score = 0
 
+        # 거래량 배율 (구간별 차등)
         if volume_ratio > 3:
             score += 5
         elif volume_ratio > 2:
             score += 3
+        elif volume_ratio > 1.5:
+            score += 1
 
+        # 당일 상승률
         if 0 < change_pct < 5:
             score += 3
+        elif change_pct >= 5:
+            score += 1
 
+        # RSI (구간별 차등)
         if today_rsi < 60:
             score += 2
+        elif today_rsi < 70:
+            score += 1
 
+        # 거래대금 (구간별 차등)
         if trading_value > 10_000_000_000:
             score += 3
+        elif trading_value > 5_000_000_000:
+            score += 1
 
+        # 테마
         score += len(detected_themes) * 2
 
+        # 52주 신고가 근접
         if near_52w_high:
             score += 3
 
+        # 거래량 눌림 패턴
         if vol_consolidation:
             score += 2
 
+        # MA20 위/아래 (점수로 반영)
+        if above_ma20:
+            score += 2
+        else:
+            score -= 1
+
+        # 상대강도
         if relative_strength > 5:
             score += 3
         elif relative_strength > 2:
             score += 1
 
+        # 외국인/기관 수급
         if investor["foreign"] > 0:
             score += 3
-
         if investor["institution"] > 0:
             score += 2
 
+        # 섹터 ETF 역행 감점
         if not sector_bullish:
             score -= 3
 
-        print(f"  ✅ {name} 통과 | 점수:{score} | RSI:{today_rsi} | 거래량:{volume_ratio:.1f}배")
+        # 최소 점수 컷
+        if score < 3:
+            return None
+
+        print(f"  ✅ {name} | 점수:{score} | RSI:{today_rsi} | 거래량:{volume_ratio:.1f}배 | MA20:{'위' if above_ma20 else '아래'}")
 
         return {
             "name":              name,
@@ -399,6 +396,7 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
             "volume_ratio":      round(volume_ratio, 1),
             "trading_value":     int(trading_value / 100_000_000),
             "rsi":               today_rsi,
+            "above_ma20":        above_ma20,
             "relative_strength": relative_strength,
             "near_52w_high":     near_52w_high,
             "vol_consolidation": vol_consolidation,
@@ -439,15 +437,15 @@ def format_discord_message(stock: dict) -> str:
         "🔑 신고가 근접"                              if stock["near_52w_high"]         else "",
         "🧱 눌림 패턴"                                if stock["vol_consolidation"]      else "",
         f"📡 시장대비 +{stock['relative_strength']}%" if stock["relative_strength"] > 2  else "",
+        "📊 MA20 위"                                  if stock["above_ma20"]             else "📊 MA20 아래",
         "⚠️ 섹터역행"                                 if not stock["sector_bullish"]     else "",
     ]))
 
     msg = (
         f"🚨 초기 수급 감지\n\n"
         f"🔥 종목: {stock['name']} ({stock['code']})\n\n"
-        f"⭐ 점수: {stock['score']}점"
-        + (f"\n{flags}" if flags else "")
-        + "\n\n"
+        f"⭐ 점수: {stock['score']}점\n"
+        f"{flags}\n\n"
         f"📈 당일 상승률:  {stock['change']}%\n"
         f"📊 5일 상승률:   {stock['five_day_change']}%\n"
         f"📈 거래량 증가:  {stock['volume_ratio']}배\n"
@@ -474,7 +472,7 @@ def format_discord_message(stock: dict) -> str:
 # ==================================================
 def main() -> None:
 
-    # ① 장 시간 체크 — 장 외 시간이면 즉시 종료
+    # ① 장 시간 체크
     if not is_market_open():
         now_utc = datetime.utcnow()
         kst_h   = (now_utc.hour + 9) % 24
@@ -484,7 +482,7 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v2.1")
+    print(f"🚀 초기 수급 탐지 스캐너 v2.2")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
