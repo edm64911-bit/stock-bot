@@ -37,19 +37,21 @@ jobs:
 
       - name: 스캐너 실행
         env:
-          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          WEBHOOK_STOCK:        ${{ secrets.WEBHOOK_STOCK }}
+          WEBHOOK_STOCK_WEEKLY: ${{ secrets.WEBHOOK_STOCK_WEEKLY }}
+          WEBHOOK_COIN:         ${{ secrets.WEBHOOK_COIN }}
+          WEBHOOK_COIN_WEEKLY:  ${{ secrets.WEBHOOK_COIN_WEEKLY }}
         run: python main.py
 
       - name: 추적 실행
         env:
-          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          WEBHOOK_STOCK: ${{ secrets.WEBHOOK_STOCK }}
         run: python tracker.py
 
       - name: 백테스트 실행 (일요일만)
         if: github.event.schedule == '0 22 * * 0'
         env:
-          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          WEBHOOK_STOCK_WEEKLY: ${{ secrets.WEBHOOK_STOCK_WEEKLY }}
         run: python backtest.py
 
       - name: 결과 커밋
