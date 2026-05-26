@@ -3,7 +3,7 @@ import math
 import time
 import requests
 import feedparser
-import yfinance as yf
+import pandas as pd
 import FinanceDataReader as fdr
 
 from concurrent.futures import (
@@ -88,40 +88,35 @@ def send_discord_message(message):
         print("디스코드 오류:", e)
 
 # ==================================================
-# 시장 코드
-# ==================================================
-def get_market_suffix(market):
-
-    if "KOSDAQ" in market:
-        return ".KQ"
-
-    return ".KS"
-
-# ==================================================
 # RSI
 # ==================================================
-def calculate_rsi(close):
+def calculate_rsi(close, period=14):
 
     delta = close.diff()
 
-    up = delta.clip(lower=0)
-
-    down = (
-        -1
-        * delta.clip(upper=0)
+    gain = (
+        delta.where(
+            delta > 0,
+            0
+        )
     )
 
-    ema_up = up.ewm(
-        com=13,
-        adjust=False
+    loss = (
+        -delta.where(
+            delta < 0,
+            0
+        )
+    )
+
+    avg_gain = gain.rolling(
+        period
     ).mean()
 
-    ema_down = down.ewm(
-        com=13,
-        adjust=False
+    avg_loss = loss.rolling(
+        period
     ).mean()
 
-    rs = ema_up / ema_down
+    rs = avg_gain / avg_loss
 
     rsi = (
         100
@@ -135,36 +130,39 @@ def calculate_rsi(close):
 # ==================================================
 def calculate_atr(data):
 
-    data['Prev_Close'] = (
-        data['Close'].shift(1)
-    )
-
-    data['TR1'] = (
+    high_low = (
         data['High']
         - data['Low']
     )
 
-    data['TR2'] = abs(
+    high_close = abs(
         data['High']
-        - data['Prev_Close']
+        - data['Close'].shift()
     )
 
-    data['TR3'] = abs(
+    low_close = abs(
         data['Low']
-        - data['Prev_Close']
+        - data['Close'].shift()
     )
 
-    data['TR'] = data[
-        ['TR1', 'TR2', 'TR3']
-    ].max(axis=1)
+    ranges = pd.concat(
+        [
+            high_low,
+            high_close,
+            low_close
+        ],
+        axis=1
+    )
 
-    data['ATR'] = (
-        data['TR']
+    true_range = ranges.max(axis=1)
+
+    atr = (
+        true_range
         .rolling(14)
         .mean()
     )
 
-    return data['ATR'].iloc[-1]
+    return atr.iloc[-1]
 
 # ==================================================
 # 뉴스 분석
@@ -194,7 +192,9 @@ def analyze_news(name):
 
             news_titles.append(title)
 
-            cleaned = clean_text(title)
+            cleaned = clean_text(
+                title
+            )
 
             for (
                 theme,
@@ -230,24 +230,23 @@ def analyze_stock(row):
 
         code = row['Code']
         name = row['Name']
-        market = row['Market']
 
-        ticker_code = (
-            code
-            + get_market_suffix(market)
-        )
-
-        ticker = yf.Ticker(
-            ticker_code
-        )
-
-        data = ticker.history(
-            period="3mo"
+        # ==================================================
+        # 데이터
+        # ==================================================
+        data = fdr.DataReader(
+            code,
+            '2025-01-01'
         )
 
         data = data.dropna()
 
+        print(name, len(data))
+
         if len(data) < 30:
+
+            print(name, "데이터 부족")
+
             return None
 
         # ==================================================
@@ -261,8 +260,14 @@ def analyze_stock(row):
             data['Close'].iloc[-2]
         )
 
+        if (
+            today_close <= 0
+            or yesterday_close <= 0
+        ):
+            return None
+
         # ==================================================
-        # 상승률
+        # 등락률
         # ==================================================
         change_percent = (
 
@@ -321,36 +326,28 @@ def analyze_stock(row):
         )
 
         # ==================================================
-        # 이동평균선
-        # ==================================================
-        ma20 = (
-            data['Close']
-            .tail(20)
-            .mean()
-        )
-
-        # ==================================================
-        # 조건 완화 버전
+        # 테스트용 완화 조건
         # ==================================================
         if not (
 
-            volume_ratio > 1.2
+            volume_ratio > 1.05
 
-            and change_percent > -3
-            and change_percent < 7
-
-            and today_rsi < 70
+            and change_percent > -5
+            and change_percent < 10
 
         ):
 
             return None
 
-        # 거래대금 완화
-        if trading_value < 5000000000:
+        # ==================================================
+        # 거래대금
+        # ==================================================
+        if trading_value < 1000000000:
+
             return None
 
         # ==================================================
-        # 뉴스 분석
+        # 뉴스
         # ==================================================
         (
             news_titles,
@@ -371,7 +368,7 @@ def analyze_stock(row):
 
         stop_loss = int(
             today_close
-            - (today_atr)
+            - today_atr
         )
 
         # ==================================================
@@ -379,16 +376,16 @@ def analyze_stock(row):
         # ==================================================
         score = 0
 
-        if volume_ratio > 2:
+        if volume_ratio > 1.5:
             score += 3
 
         if 0 < change_percent < 5:
             score += 3
 
-        if today_rsi < 60:
+        if trading_value > 5000000000:
             score += 2
 
-        if trading_value > 10000000000:
+        if today_rsi < 70:
             score += 2
 
         score += (
@@ -448,22 +445,32 @@ def main():
 
     print("🚀 초기 수급 탐지 시작")
 
+    # ==================================================
+    # 종목 리스트
+    # ==================================================
     stocks = fdr.StockListing(
         'KRX'
     )
 
     stocks = stocks[
+
         stocks['Market'].isin([
             'KOSPI',
             'KOSDAQ'
         ])
+
     ]
 
-    # 속도용
-    stocks = stocks.head(300)
+    # ==================================================
+    # 샘플링
+    # ==================================================
+    stocks = stocks.sample(300)
 
     results = []
 
+    # ==================================================
+    # 멀티스레드
+    # ==================================================
     with ThreadPoolExecutor(
         max_workers=10
     ) as executor:
@@ -518,7 +525,7 @@ def main():
         return
 
     # ==================================================
-    # 종목 출력
+    # 디스코드 출력
     # ==================================================
     for stock in top_results:
 
@@ -552,6 +559,7 @@ def main():
 
             f"🛑 손절가: "
             f"{stock['stop_loss']:,}원\n"
+
         )
 
         if stock['themes']:
