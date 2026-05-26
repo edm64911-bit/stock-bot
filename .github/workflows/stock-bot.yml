@@ -2,17 +2,22 @@ name: Stock Bot
 
 on:
   schedule:
-    - cron: '0 0 * * 1-5'
-    - cron: '0 2 * * 1-5'
-    - cron: '0 4 * * 1-5'
-    - cron: '0 6 * * 1-5'
+    - cron: '0 0 * * 1-5'     # KST 09:00 스캔
+    - cron: '0 2 * * 1-5'     # KST 11:00 스캔
+    - cron: '0 4 * * 1-5'     # KST 13:00 스캔
+    - cron: '0 6 * * 1-5'     # KST 15:00 스캔
+    - cron: '30 0 * * 1-5'    # KST 09:30 추적
+    - cron: '30 2 * * 1-5'    # KST 11:30 추적
+    - cron: '30 4 * * 1-5'    # KST 13:30 추적
+    - cron: '30 6 * * 1-5'    # KST 15:30 추적
+    - cron: '0 22 * * 0'      # KST 일요일 07:00 백테스트 (주간 리포트)
   workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  run-bot:
+  scan:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -28,17 +33,28 @@ jobs:
 
       - name: 라이브러리 설치
         run: |
-          pip install finance-datareader feedparser requests pandas
+          pip install finance-datareader feedparser requests pandas scikit-learn
 
-      - name: 봇 실행
+      - name: 스캐너 실행
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
         run: python main.py
+
+      - name: 추적 실행
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: python tracker.py
+
+      - name: 백테스트 실행 (일요일만)
+        if: github.event.schedule == '0 22 * * 0'
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: python backtest.py
 
       - name: 결과 커밋
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add scan_*.json scanner_*.log || true
+          git add scan_*.json scanner_*.log positions.json backtest_result.json tracker_*.log || true
           git diff --cached --quiet || git commit -m "scan $(date +'%Y%m%d_%H%M')"
           git push || true
