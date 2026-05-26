@@ -1,10 +1,9 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v2.7
+  초기 수급 탐지 스캐너 v2.8
   변경사항:
-    - Groq JSON 파싱 강화
-    - 정규식으로 JSON 블록 추출
-    - 파싱 실패 시 텍스트에서 verdict 키워드 추출
+    - Groq → Google Gemini API로 교체
+    - gemini-2.0-flash 모델 사용 (무료)
 ===================================================
 """
 
@@ -51,8 +50,8 @@ logging.basicConfig(
 # ==================================================
 # 환경 변수
 # ==================================================
-WEBHOOK_URL  = os.getenv("WEBHOOK_URL", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+WEBHOOK_URL   = os.getenv("WEBHOOK_URL", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # ==================================================
 # 날짜 동적 설정
@@ -210,51 +209,9 @@ def analyze_news(name: str) -> tuple:
         return [], []
 
 # ==================================================
-# Groq 사용 가능한 모델 자동 선택
+# JSON 안전 파싱
 # ==================================================
-def get_best_groq_model() -> str:
-    priority = [
-        "llama-3.3-70b-versatile",
-        "llama3-70b-8192",
-        "llama-3.1-70b-versatile",
-        "llama3-8b-8192",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it",
-    ]
-    try:
-        resp = requests.get(
-            "https://api.groq.com/openai/v1/models",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            timeout=10
-        )
-        resp.raise_for_status()
-        available = {m["id"] for m in resp.json().get("data", [])}
-        print(f"  Groq 사용 가능 모델: {len(available)}개")
-
-        for model in priority:
-            if model in available:
-                print(f"  ✅ 선택된 모델: {model}")
-                return model
-
-        first = sorted(available)[0]
-        print(f"  ⚠️ 우선순위 모델 없음 → 기본 사용: {first}")
-        return first
-
-    except Exception as e:
-        logging.error(f"Groq 모델 목록 조회 실패: {e}")
-        print(f"  ⚠️ 모델 목록 조회 실패 → llama3-70b-8192 사용")
-        return "llama3-70b-8192"
-
-# ==================================================
-# JSON 안전 파싱 (강화 버전)
-# ==================================================
-def safe_parse_groq_response(content: str) -> dict:
-    """
-    AI 응답에서 JSON 추출 — 3단계 시도
-    1. 그대로 파싱
-    2. 정규식으로 JSON 블록 추출 후 파싱
-    3. 텍스트에서 verdict 키워드 직접 추출
-    """
+def safe_parse_response(content: str) -> dict:
     # 1단계: 마크다운 제거 후 직접 파싱
     cleaned = content.replace("```json", "").replace("```", "").strip()
     try:
@@ -277,23 +234,18 @@ def safe_parse_groq_response(content: str) -> dict:
     elif "진입금지" in content or "진입 금지" in content:
         verdict = "진입금지"
 
-    # reason 추출 시도
-    reason = ""
-    risk   = ""
     lines  = [l.strip() for l in content.split("\n") if l.strip()]
-    if len(lines) > 1:
-        reason = lines[1][:100]
-    if len(lines) > 2:
-        risk = lines[2][:100]
+    reason = lines[1][:100] if len(lines) > 1 else ""
+    risk   = lines[2][:100] if len(lines) > 2 else ""
 
     return {"verdict": verdict, "reason": reason, "risk": risk}
 
 # ==================================================
-# Groq AI 분석
+# Gemini AI 분석
 # ==================================================
-def analyze_with_groq(stock: dict, model: str) -> dict:
-    if not GROQ_API_KEY:
-        return {"verdict": "분석불가", "reason": "GROQ_API_KEY 미설정", "risk": ""}
+def analyze_with_gemini(stock: dict) -> dict:
+    if not GEMINI_API_KEY:
+        return {"verdict": "분석불가", "reason": "GEMINI_API_KEY 미설정", "risk": ""}
 
     prompt = (
         f"당신은 한국 주식 단기 트레이딩 전문가입니다.\n"
@@ -313,42 +265,32 @@ def analyze_with_groq(stock: dict, model: str) -> dict:
         f"기관 3일: {stock['institution_net']:+,}주\n"
         f"섹터 강세: {'예' if stock['sector_bullish'] else '아니오'}\n"
         f"테마: {', '.join(stock['themes']) if stock['themes'] else '없음'}\n"
-        f"진입가: {stock['entry_price']:,}원 / 손절: {stock['stop_loss']:,}원 / RR: 1:{stock['rr_ratio']}\n\n"
-        f"반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이:\n"
-        f'{"{"}"verdict": "진입추천" 또는 "관망" 또는 "진입금지", "reason": "근거 2줄", "risk": "리스크 1줄"{"}"}'
+        f"진입가: {stock['entry_price']:,}원\n"
+        f"손절가: {stock['stop_loss']:,}원\n"
+        f"1차목표: {stock['target_price_1']:,}원\n"
+        f"2차목표: {stock['target_price_2']:,}원\n"
+        f"RR: 1:{stock['rr_ratio']}\n\n"
+        f"반드시 아래 JSON 형식으로만 응답하세요:\n"
+        f'{{"verdict": "진입추천" 또는 "관망" 또는 "진입금지", "reason": "근거 2줄", "risk": "리스크 1줄"}}'
     )
 
     try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model":       model,
-                "messages":    [
-                    {
-                        "role":    "system",
-                        "content": "You must respond only with valid JSON. No markdown, no explanation, no extra text."
-                    },
-                    {
-                        "role":    "user",
-                        "content": prompt
-                    }
-                ],
-                "temperature":    0.1,
-                "max_tokens":     300,
-                "response_format": {"type": "json_object"},
-            },
-            timeout=15
-        )
+        url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature":     0.1,
+                "maxOutputTokens": 300,
+            }
+        }
+        resp = requests.post(url, json=body, timeout=15)
         resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-        return safe_parse_groq_response(content)
+
+        content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return safe_parse_response(content)
 
     except Exception as e:
-        logging.error(f"Groq 분석 오류 [{stock['name']}]: {e}")
+        logging.error(f"Gemini 분석 오류 [{stock['name']}]: {e}")
         return {"verdict": "분석실패", "reason": str(e)[:50], "risk": ""}
 
 # ==================================================
@@ -610,7 +552,7 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v2.7")
+    print(f"🚀 초기 수급 탐지 스캐너 v2.8")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
@@ -661,27 +603,23 @@ def main() -> None:
         send_discord_message(msg)
         return
 
-    # ⑤ Groq 모델 자동 선택
-    print("\n🤖 Groq 모델 선택 중...")
-    groq_model = get_best_groq_model()
-
-    # ⑥ Groq AI 분석
-    print("\n🤖 Groq AI 분석 중...")
+    # ⑤ Gemini AI 분석
+    print("\n🤖 Gemini AI 분석 중...")
     for stock in top_results:
-        ai_result = analyze_with_groq(stock, groq_model)
+        ai_result = analyze_with_gemini(stock)
         stock["ai_verdict"] = ai_result.get("verdict", "분석실패")
         stock["ai_reason"]  = ai_result.get("reason", "")
         stock["ai_risk"]    = ai_result.get("risk", "")
         print(f"  {stock['name']} → {stock['ai_verdict']}")
-        time.sleep(0.5)
+        time.sleep(1)  # Gemini 무료 레이트 리밋 방지
 
-    # ⑦ JSON 저장
+    # ⑥ JSON 저장
     save_results(results)
 
-    # ⑧ positions 저장
+    # ⑦ positions 저장
     save_positions(top_results)
 
-    # ⑨ Discord 전송
+    # ⑧ Discord 전송
     for rank, stock in enumerate(top_results, start=1):
         message = format_discord_message(stock, rank)
         print(message)
