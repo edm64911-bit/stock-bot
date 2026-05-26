@@ -1,7 +1,9 @@
 name: Stock Bot
 
 on:
+
   schedule:
+
     - cron: '0 0,3,6,9,12 * * *'
 
   workflow_dispatch:
@@ -10,6 +12,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+
   run-bot:
 
     runs-on: ubuntu-latest
@@ -28,12 +31,12 @@ jobs:
       - name: 라이브러리 설치
 
         run: |
+
           pip install finance-datareader
           pip install yfinance
           pip install feedparser
           pip install requests
           pip install pandas
-          pip install numpy
 
       - name: 봇 실행
 
