@@ -1,0 +1,1 @@
+2026-05-26 21:17:10,808 [ERROR] 김치프리미엄 조회 실패: HTTPSConnectionPool(host='quotation-api-cdn.dunamu.com', port=443): Max retries exceeded with url: /v1/forex/recent?codes=FRX.KRWUSD (Caused by NameResolutionError("HTTPSConnection(host='quotation-api-cdn.dunamu.com', port=443): Failed to resolve 'quotation-api-cdn.dunamu.com' ([Errno 11001] getaddrinfo failed)"))
