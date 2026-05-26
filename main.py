@@ -1,9 +1,10 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v2.4
+  초기 수급 탐지 스캐너 v2.5
   변경사항:
-    - 윗꼬리음봉 하드컷 제거 → 감점(-2)으로 전환
-    - tracker.py 연동: 진입 종목 positions.json 저장
+    - Groq AI 분석 추가 (종목별 진입 판단)
+    - 진입 추천 / 관망 / 진입 금지 판단
+    - AI 분석 근거 + 리스크 Discord 전송
 ===================================================
 """
 
@@ -49,7 +50,8 @@ logging.basicConfig(
 # ==================================================
 # 환경 변수
 # ==================================================
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_URL  = os.getenv("WEBHOOK_URL", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # ==================================================
 # 날짜 동적 설정
@@ -89,11 +91,13 @@ def send_discord_message(message: str) -> None:
     if not WEBHOOK_URL:
         print("[Discord] WEBHOOK_URL 미설정\n", message)
         return
-    try:
-        resp = requests.post(WEBHOOK_URL, json={"content": message}, timeout=10)
-        resp.raise_for_status()
-    except Exception as e:
-        logging.error(f"Discord 오류: {e}")
+    chunks = [message[i:i+1900] for i in range(0, len(message), 1900)]
+    for chunk in chunks:
+        try:
+            resp = requests.post(WEBHOOK_URL, json={"content": chunk}, timeout=10)
+            resp.raise_for_status()
+        except Exception as e:
+            logging.error(f"Discord 오류: {e}")
 
 def send_discord_error(msg: str) -> None:
     send_discord_message(f"⚠️ [스캐너 오류] {msg}")
@@ -204,6 +208,77 @@ def analyze_news(name: str) -> tuple:
         logging.error(f"뉴스 오류 [{name}]: {e}")
         return [], []
 
+# ==================================================
+# Groq AI 분석
+# ==================================================
+def analyze_with_groq(stock: dict) -> dict:
+    """
+    Groq AI로 종목 진입 판단
+    반환: {"verdict": "진입추천"|"관망"|"진입금지", "reason": str, "risk": str}
+    """
+    if not GROQ_API_KEY:
+        return {"verdict": "분석불가", "reason": "GROQ_API_KEY 미설정", "risk": ""}
+
+    prompt = f"""
+당신은 한국 주식 단기 트레이딩 전문가입니다.
+아래 종목 데이터를 분석하고 진입 여부를 판단해 주세요.
+
+[종목 정보]
+- 종목명: {stock['name']} ({stock['code']})
+- 당일 상승률: {stock['change']}%
+- 5일 상승률: {stock['five_day_change']}%
+- 거래량 증가: {stock['volume_ratio']}배
+- 거래대금: {stock['trading_value']}억
+- RSI: {stock['rsi']}
+- MA20 위치: {'MA20 위' if stock['above_ma20'] else 'MA20 아래'}
+- 상대강도 (vs KOSPI): {stock['relative_strength']:+.1f}%
+- 캔들 패턴: {stock['candle']}
+- 52주 신고가 근접: {'예' if stock['near_52w_high'] else '아니오'}
+- 눌림 패턴: {'예' if stock['vol_consolidation'] else '아니오'}
+- 외국인 3일 순매수: {stock['foreign_net']:+,}주
+- 기관 3일 순매수: {stock['institution_net']:+,}주
+- 섹터 ETF 강세: {'예' if stock['sector_bullish'] else '아니오'}
+- 테마: {', '.join(stock['themes']) if stock['themes'] else '없음'}
+- 진입가: {stock['entry_price']:,}원
+- 1차 목표: {stock['target_price_1']:,}원
+- 2차 목표: {stock['target_price_2']:,}원
+- 손절가: {stock['stop_loss']:,}원
+- RR: 1:{stock['rr_ratio']}
+
+아래 JSON 형식으로만 답변하세요. 다른 텍스트는 절대 포함하지 마세요:
+{{"verdict": "진입추천" 또는 "관망" 또는 "진입금지", "reason": "진입 판단 근거 2~3줄", "risk": "주요 리스크 1~2줄"}}
+"""
+
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 300,
+            },
+            timeout=15
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+
+        # JSON 파싱
+        content = content.replace("```json", "").replace("```", "").strip()
+        result  = json.loads(content)
+        return result
+
+    except Exception as e:
+        logging.error(f"Groq 분석 오류 [{stock['name']}]: {e}")
+        return {"verdict": "분석실패", "reason": str(e)[:50], "risk": ""}
+
+# ==================================================
+# 종목 분석
+# ==================================================
 def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
     code = row["Code"]
     name = row["Name"]
@@ -291,12 +366,12 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
         if not sector_bullish:     score -= 3
         if candle == "장대양봉":       score += 3
         elif candle == "아랫꼬리양봉": score += 2
-        elif candle == "윗꼬리음봉":   score -= 2  # 하드컷 제거 → 감점으로
+        elif candle == "윗꼬리음봉":   score -= 2
 
         if score < 3:
             return None
 
-        print(f"  ✅ {name} | 점수:{score} | RSI:{today_rsi} | 거래량:{volume_ratio:.1f}배 | 캔들:{candle} | RR:1:{rr_ratio}")
+        print(f"  ✅ {name} | 점수:{score} | RSI:{today_rsi} | 거래량:{volume_ratio:.1f}배 | 캔들:{candle}")
 
         return {
             "name":              name,
@@ -331,22 +406,24 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
             send_discord_error(f"연결 오류 [{name}]")
         return None
 
+# ==================================================
+# 결과 JSON 저장
+# ==================================================
 def save_results(results: list) -> None:
     filename = f"scan_{TODAY.strftime('%Y%m%d_%H%M')}.json"
     try:
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
-        print(f"\n  💾 스캔 결과 저장: {filename}")
+        print(f"\n  💾 결과 저장: {filename}")
     except Exception as e:
         logging.error(f"결과 저장 실패: {e}")
 
 # ==================================================
-# tracker.py 연동: positions.json에 진입 종목 추가
+# tracker 연동
 # ==================================================
 def save_positions(top_results: list) -> None:
     filename = "positions.json"
     try:
-        # 기존 포지션 로드
         if os.path.exists(filename):
             with open(filename, "r", encoding="utf-8") as f:
                 positions = json.load(f)
@@ -357,25 +434,32 @@ def save_positions(top_results: list) -> None:
 
         for stock in top_results:
             if stock["code"] in existing_codes:
-                continue  # 이미 추적 중인 종목 스킵
+                continue
+            # AI 진입추천 종목만 포지션 저장
+            if stock.get("ai_verdict") == "진입금지":
+                continue
             positions.append({
-                "code":          stock["code"],
-                "name":          stock["name"],
-                "entry_price":   stock["entry_price"],
-                "stop_loss":     stock["stop_loss"],
-                "target_price_1":stock["target_price_1"],
-                "target_price_2":stock["target_price_2"],
-                "entered_at":    TODAY.strftime("%Y-%m-%d %H:%M:%S"),
-                "status":        "진행중",   # 진행중 / 1차도달 / 2차도달 / 손절
-                "result":        None,
+                "code":           stock["code"],
+                "name":           stock["name"],
+                "entry_price":    stock["entry_price"],
+                "stop_loss":      stock["stop_loss"],
+                "target_price_1": stock["target_price_1"],
+                "target_price_2": stock["target_price_2"],
+                "entered_at":     TODAY.strftime("%Y-%m-%d %H:%M:%S"),
+                "status":         "진행중",
+                "result":         None,
+                "ai_verdict":     stock.get("ai_verdict", ""),
             })
 
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(positions, f, ensure_ascii=False, indent=2)
-        print(f"  📌 포지션 저장: {filename} ({len(positions)}개 추적 중)")
+        print(f"  📌 포지션 저장: {filename} ({len(positions)}개)")
     except Exception as e:
         logging.error(f"포지션 저장 실패: {e}")
 
+# ==================================================
+# Discord 포맷
+# ==================================================
 def format_discord_message(stock: dict, rank: int) -> str:
     candle_emoji = {
         "장대양봉":    "🕯️ 장대양봉",
@@ -391,6 +475,12 @@ def format_discord_message(stock: dict, rank: int) -> str:
         "📊 MA20 위"                                  if stock["above_ma20"]             else "📊 MA20 아래",
         "⚠️ 섹터역행"                                 if not stock["sector_bullish"]     else "",
     ]))
+
+    # AI 판단 이모지
+    verdict       = stock.get("ai_verdict", "")
+    verdict_emoji = {"진입추천": "✅", "관망": "⚠️", "진입금지": "❌", "분석실패": "❓"}.get(verdict, "❓")
+    ai_reason     = stock.get("ai_reason", "")
+    ai_risk       = stock.get("ai_risk", "")
 
     msg = (
         f"🚨 수급 감지 #{rank}\n\n"
@@ -408,11 +498,14 @@ def format_discord_message(stock: dict, rank: int) -> str:
         f"🏦 기관 3일:     {stock['institution_net']:+,}주\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 진입가:    {stock['entry_price']:,}원\n"
-        f"🚀 1차 목표:  {stock['target_price_1']:,}원  → 절반 청산 후 손절을 본전으로\n"
+        f"🚀 1차 목표:  {stock['target_price_1']:,}원  → 절반 청산 후 손절 본전으로\n"
         f"🚀 2차 목표:  {stock['target_price_2']:,}원  → 나머지 전량 청산\n"
         f"🛑 손절가:    {stock['stop_loss']:,}원  (절대 불변)\n"
         f"📐 RR:        1 : {stock['rr_ratio']}\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🤖 AI 분석: {verdict_emoji} {verdict}\n"
+        f"근거: {ai_reason}\n"
+        f"리스크: {ai_risk}\n"
     )
 
     if stock["themes"]:
@@ -422,7 +515,12 @@ def format_discord_message(stock: dict, rank: int) -> str:
 
     return msg
 
+# ==================================================
+# 메인
+# ==================================================
 def main() -> None:
+
+    # ① 장 시간 체크
     if not is_market_open():
         now_utc = datetime.utcnow()
         kst_h   = (now_utc.hour + 9) % 24
@@ -432,10 +530,11 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v2.4")
+    print(f"🚀 초기 수급 탐지 스캐너 v2.5")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
+    # ② KOSPI 로딩
     print("\n📊 KOSPI 데이터 로딩 중...")
     try:
         kospi_data = fdr.DataReader("KS11", START_DATE)
@@ -444,9 +543,11 @@ def main() -> None:
         kospi_data = None
         print("  ⚠️ KOSPI 로딩 실패 — 상대강도 생략")
 
+    # ③ 섹터 ETF 캐시
     print("\n📦 섹터 ETF 로딩 중...")
     etf_cache = load_etf_cache()
 
+    # ④ 종목 리스트
     print("\n📋 KRX 종목 로딩 중...")
     stocks = fdr.StockListing("KRX")
     stocks = stocks[stocks["Market"].isin(["KOSPI", "KOSDAQ"])]
@@ -480,9 +581,23 @@ def main() -> None:
         send_discord_message(msg)
         return
 
-    save_results(results)
-    save_positions(top_results)   # tracker 연동
+    # ⑤ Groq AI 분석
+    print("\n🤖 Groq AI 분석 중...")
+    for stock in top_results:
+        ai_result = analyze_with_groq(stock)
+        stock["ai_verdict"] = ai_result.get("verdict", "분석실패")
+        stock["ai_reason"]  = ai_result.get("reason", "")
+        stock["ai_risk"]    = ai_result.get("risk", "")
+        print(f"  {stock['name']} → {stock['ai_verdict']}")
+        time.sleep(0.5)  # Groq API 레이트 리밋 방지
 
+    # ⑥ JSON 저장
+    save_results(results)
+
+    # ⑦ positions 저장 (AI 진입금지 제외)
+    save_positions(top_results)
+
+    # ⑧ Discord 전송
     for rank, stock in enumerate(top_results, start=1):
         message = format_discord_message(stock, rank)
         print(message)
@@ -491,6 +606,7 @@ def main() -> None:
         time.sleep(0.3)
 
     print(f"\n✅ 완료 | 소요: {elapsed}초")
+
 
 if __name__ == "__main__":
     main()
