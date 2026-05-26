@@ -529,11 +529,24 @@ def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) 
 # ==================================================
 # 결과 JSON 저장
 # ==================================================
+def sanitize_for_json(obj):
+    """NaN, Inf 등 JSON 비호환 값을 None으로 변환"""
+    if isinstance(obj, float):
+        if obj != obj or obj == float('inf') or obj == float('-inf'):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_json(v) for v in obj]
+    return obj
+
 def save_results(results: list) -> None:
     filename = f"scan_{TODAY.strftime('%Y%m%d_%H%M')}.json"
     try:
+        clean = sanitize_for_json(results)
         with open(filename, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+            json.dump(clean, f, ensure_ascii=False, indent=2)
         print(f"\n  💾 결과 저장: {filename}")
     except Exception as e:
         logging.error(f"결과 저장 실패: {e}")

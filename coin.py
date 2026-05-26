@@ -1,11 +1,10 @@
 """
 ===================================================
-  코인 수급 탐지 스캐너 v1.0
-  - 업비트 원화 마켓 전체 스캔
-  - 멀티 타임프레임 (4시간/1시간/15분봉)
-  - BTC 방향성 / 공포탐욕지수 / 김치프리미엄 / 도미넌스
-  - 세력 펌핑 감지 / 신규상장 제외 / 스테이블코인 제외
-  - 2시간마다 실행
+  코인 수급 탐지 스캐너 v1.1
+  변경사항:
+    - 시장 불량이어도 스캔 진행
+    - 시장 상황 요약 + 전체매수금지/매수시그널 표시
+    - 상위 종목 Discord 전송
 ===================================================
 """
 
@@ -40,7 +39,7 @@ logging.basicConfig(
 # ==================================================
 STABLE_COINS = {
     "USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP",
-    "GUSD", "FRAX", "LUSD", "SUSD", "UST"
+    "GUSD", "FRAX", "LUSD", "SUSD", "UST", "FDUSD"
 }
 
 # ==================================================
@@ -86,10 +85,20 @@ def send_discord_message(message: str) -> None:
             logging.error(f"Discord 오류: {e}")
 
 # ==================================================
+# NaN 안전 변환 (JSON 저장용)
+# ==================================================
+def safe_value(v):
+    if isinstance(v, float) and (v != v):  # NaN 체크
+        return None
+    return v
+
+def sanitize_dict(d: dict) -> dict:
+    return {k: safe_value(v) for k, v in d.items()}
+
+# ==================================================
 # 업비트 API
 # ==================================================
 def get_upbit_markets() -> list:
-    """원화 마켓 전체 조회"""
     try:
         resp = requests.get("https://api.upbit.com/v1/market/all", timeout=10)
         resp.raise_for_status()
@@ -100,9 +109,6 @@ def get_upbit_markets() -> list:
         return []
 
 def get_candles(market: str, unit: int, count: int = 50) -> pd.DataFrame:
-    """
-    unit: 분봉 단위 (15, 60, 240)
-    """
     try:
         url  = f"https://api.upbit.com/v1/candles/minutes/{unit}"
         resp = requests.get(url, params={"market": market, "count": count}, timeout=10)
@@ -112,11 +118,11 @@ def get_candles(market: str, unit: int, count: int = 50) -> pd.DataFrame:
             return pd.DataFrame()
         df = pd.DataFrame(data)
         df = df.rename(columns={
-            "candle_date_time_kst": "datetime",
-            "opening_price":        "Open",
-            "high_price":           "High",
-            "low_price":            "Low",
-            "trade_price":          "Close",
+            "candle_date_time_kst":    "datetime",
+            "opening_price":           "Open",
+            "high_price":              "High",
+            "low_price":               "Low",
+            "trade_price":             "Close",
             "candle_acc_trade_volume": "Volume",
             "candle_acc_trade_price":  "TradeValue",
         })
@@ -128,7 +134,6 @@ def get_candles(market: str, unit: int, count: int = 50) -> pd.DataFrame:
         return pd.DataFrame()
 
 def get_ticker(markets: list) -> dict:
-    """현재 시세 일괄 조회"""
     try:
         codes = ",".join(markets)
         resp  = requests.get(
@@ -146,12 +151,8 @@ def get_ticker(markets: list) -> dict:
 # 시장 상황 체크
 # ==================================================
 def get_fear_greed_index() -> dict:
-    """공포탐욕지수 (alternative.me 무료 API)"""
     try:
-        resp = requests.get(
-            "https://api.alternative.me/fng/?limit=1",
-            timeout=10
-        )
+        resp  = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
         resp.raise_for_status()
         data  = resp.json()["data"][0]
         value = int(data["value"])
@@ -162,12 +163,8 @@ def get_fear_greed_index() -> dict:
         return {"value": 50, "label": "Neutral"}
 
 def get_btc_dominance() -> float:
-    """BTC 도미넌스 (CoinGecko 무료 API)"""
     try:
-        resp = requests.get(
-            "https://api.coingecko.com/api/v3/global",
-            timeout=10
-        )
+        resp = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
         resp.raise_for_status()
         return round(resp.json()["data"]["market_cap_percentage"]["btc"], 2)
     except Exception as e:
@@ -175,51 +172,41 @@ def get_btc_dominance() -> float:
         return 50.0
 
 def get_kimchi_premium() -> float:
-    """김치프리미엄 (업비트 BTC vs 바이낸스 BTC)"""
     try:
-        # 업비트 BTC 원화 가격
-        upbit_resp = requests.get(
+        upbit_resp  = requests.get(
             "https://api.upbit.com/v1/ticker",
             params={"markets": "KRW-BTC"},
             timeout=10
         )
         upbit_price = upbit_resp.json()[0]["trade_price"]
 
-        # 바이낸스 BTC USDT 가격
-        binance_resp = requests.get(
+        binance_resp  = requests.get(
             "https://api.binance.com/api/v3/ticker/price",
             params={"symbol": "BTCUSDT"},
             timeout=10
         )
         binance_price = float(binance_resp.json()["price"])
 
-        # USD/KRW 환율 (네이버 환율 API)
         fx_resp = requests.get(
             "https://quotation-api-cdn.dunamu.com/v1/forex/recent?codes=FRX.KRWUSD",
             timeout=10
         )
-        usd_krw = fx_resp.json()[0]["basePrice"]
-
+        usd_krw     = fx_resp.json()[0]["basePrice"]
         binance_krw = binance_price * usd_krw
         premium     = (upbit_price / binance_krw - 1) * 100
         return round(premium, 2)
-
     except Exception as e:
         logging.error(f"김치프리미엄 조회 실패: {e}")
         return 0.0
 
 def check_btc_trend() -> dict:
-    """BTC 4시간봉 추세 체크"""
     try:
-        df = get_candles("KRW-BTC", 240, count=30)
+        df    = get_candles("KRW-BTC", 240, count=30)
         if df.empty or len(df) < 20:
-            return {"bullish": False, "ma20": 0, "rsi": 50}
-
+            return {"bullish": False, "ma20": 0, "rsi": 50, "price": 0}
         close = df["Close"]
         ma20  = float(close.tail(20).mean())
         cur   = float(close.iloc[-1])
-
-        # RSI
         delta    = close.diff()
         gain     = delta.where(delta > 0, 0.0)
         loss     = -delta.where(delta < 0, 0.0)
@@ -227,7 +214,6 @@ def check_btc_trend() -> dict:
         avg_loss = loss.ewm(com=13, min_periods=14).mean()
         rs       = avg_gain / avg_loss.replace(0, float("nan"))
         rsi      = float((100 - (100 / (1 + rs))).iloc[-1])
-
         return {
             "bullish": cur > ma20,
             "ma20":    round(ma20),
@@ -237,6 +223,36 @@ def check_btc_trend() -> dict:
     except Exception as e:
         logging.error(f"BTC 추세 체크 실패: {e}")
         return {"bullish": False, "ma20": 0, "rsi": 50, "price": 0}
+
+# ==================================================
+# 시장 상황 요약 메시지
+# ==================================================
+def format_market_status(market_status: dict, market_score: int) -> str:
+    fg       = market_status["fear_greed"]
+    btc      = market_status["btc"]
+    dom      = market_status["dominance"]
+    kp       = market_status["kimchi_premium"]
+
+    fg_emoji  = "😱" if fg["value"] < 25 else "😰" if fg["value"] < 45 else "😐" if fg["value"] < 55 else "😊" if fg["value"] < 75 else "🤑"
+    btc_emoji = "✅" if btc["bullish"] else "❌"
+    kp_emoji  = "⚠️ 과열" if kp > 10 else "✅"
+
+    if market_score >= 3:
+        signal = "🟢 매수 시그널 — 시장 상황 양호"
+    elif market_score == 2:
+        signal = "🟡 중립 — 선별적 진입"
+    else:
+        signal = "🔴 전체 매수 금지 — 시장 상황 불량"
+
+    return (
+        f"📊 코인 시장 상황 요약\n\n"
+        f"  {signal}\n\n"
+        f"  BTC 추세:     {btc_emoji} {'상승' if btc['bullish'] else '하락'} (RSI {btc['rsi']} / {btc['price']:,}원)\n"
+        f"  공포탐욕:     {fg_emoji} {fg['value']} ({fg['label']})\n"
+        f"  BTC 도미넌스: {dom}%\n"
+        f"  김치프리미엄: {kp}% {kp_emoji}\n"
+        f"  시장 점수:    {market_score}/3\n"
+    )
 
 # ==================================================
 # RSI 계산
@@ -249,7 +265,8 @@ def calculate_rsi(close: pd.Series, period: int = 14) -> float:
     avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
     rs       = avg_gain / avg_loss.replace(0, float("nan"))
     rsi      = 100 - (100 / (1 + rs))
-    return round(float(rsi.iloc[-1]), 2)
+    val      = float(rsi.iloc[-1])
+    return round(val, 2) if val == val else 50.0  # NaN 방어
 
 # ==================================================
 # 코인 개별 분석
@@ -257,7 +274,6 @@ def calculate_rsi(close: pd.Series, period: int = 14) -> float:
 def analyze_coin(market: str, ticker: dict) -> dict | None:
     code = market.replace("KRW-", "")
 
-    # 스테이블코인 제외
     if code in STABLE_COINS:
         return None
 
@@ -270,89 +286,88 @@ def analyze_coin(market: str, ticker: dict) -> dict | None:
 
         if cur_price <= 0:
             return None
-
-        # 거래대금 5억 미만 제외
         if trade_value < 500_000_000:
             return None
 
-        # 4시간봉 데이터
+        # 4시간봉
         df_4h = get_candles(market, 240, count=30)
         if df_4h.empty or len(df_4h) < 20:
             return None
-        time.sleep(0.1)  # API 레이트 리밋
+        time.sleep(0.1)
 
-        # 1시간봉 데이터
+        # 1시간봉
         df_1h = get_candles(market, 60, count=30)
         if df_1h.empty or len(df_1h) < 20:
             return None
         time.sleep(0.1)
 
-        # 15분봉 데이터
+        # 15분봉
         df_15m = get_candles(market, 15, count=30)
         if df_15m.empty or len(df_15m) < 20:
             return None
         time.sleep(0.1)
 
         # 신규 상장 30일 미만 제외
-        first_date = pd.to_datetime(df_4h["datetime"].iloc[0])
+        first_date  = pd.to_datetime(df_4h["datetime"].iloc[0])
         days_listed = (datetime.now() - first_date).days
         if days_listed < 30:
             return None
 
         # 4시간봉 지표
-        close_4h   = df_4h["Close"]
-        ma20_4h    = float(close_4h.tail(20).mean())
-        rsi_4h     = calculate_rsi(close_4h)
-        above_ma_4h = cur_price >= ma20_4h
-        vol_4h     = df_4h["Volume"].iloc[-1]
-        avg_vol_4h = df_4h["Volume"].iloc[-11:-1].mean()
-        vol_ratio_4h = vol_4h / avg_vol_4h if avg_vol_4h > 0 else 0
+        close_4h     = df_4h["Close"]
+        ma20_4h      = float(close_4h.tail(20).mean())
+        rsi_4h       = calculate_rsi(close_4h)
+        above_ma_4h  = cur_price >= ma20_4h
+        vol_4h       = float(df_4h["Volume"].iloc[-1])
+        avg_vol_4h   = float(df_4h["Volume"].iloc[-11:-1].mean())
+        vol_ratio_4h = round(vol_4h / avg_vol_4h, 1) if avg_vol_4h > 0 else 0
 
         # 1시간봉 지표
-        close_1h   = df_1h["Close"]
-        rsi_1h     = calculate_rsi(close_1h)
-        vol_1h     = df_1h["Volume"].iloc[-1]
-        avg_vol_1h = df_1h["Volume"].iloc[-11:-1].mean()
-        vol_ratio_1h = vol_1h / avg_vol_1h if avg_vol_1h > 0 else 0
+        close_1h     = df_1h["Close"]
+        rsi_1h       = calculate_rsi(close_1h)
+        vol_1h       = float(df_1h["Volume"].iloc[-1])
+        avg_vol_1h   = float(df_1h["Volume"].iloc[-11:-1].mean())
+        vol_ratio_1h = round(vol_1h / avg_vol_1h, 1) if avg_vol_1h > 0 else 0
 
         # 15분봉 지표
-        close_15m  = df_15m["Close"]
-        rsi_15m    = calculate_rsi(close_15m)
-        last_15m   = df_15m.iloc[-1]
-        bullish_15m = float(last_15m["Close"]) > float(last_15m["Open"])
-        vol_15m    = df_15m["Volume"].iloc[-1]
-        avg_vol_15m = df_15m["Volume"].iloc[-11:-1].mean()
-        vol_ratio_15m = vol_15m / avg_vol_15m if avg_vol_15m > 0 else 0
+        close_15m    = df_15m["Close"]
+        rsi_15m      = calculate_rsi(close_15m)
+        last_15m     = df_15m.iloc[-1]
+        bullish_15m  = float(last_15m["Close"]) > float(last_15m["Open"])
+        vol_15m      = float(df_15m["Volume"].iloc[-1])
+        avg_vol_15m  = float(df_15m["Volume"].iloc[-11:-1].mean())
+        vol_ratio_15m = round(vol_15m / avg_vol_15m, 1) if avg_vol_15m > 0 else 0
 
-        # 타임프레임 일치 여부
+        # 타임프레임 일치
         tf_bullish = sum([
             above_ma_4h,
             vol_ratio_1h > 1.5,
             bullish_15m,
         ])
 
-        # 52주 고점 근접 (4시간봉 기준)
-        high_max   = df_4h["High"].max()
-        near_high  = (cur_price / high_max) >= 0.90 if high_max > 0 else False
+        # 신고가 근접
+        high_max  = float(df_4h["High"].max())
+        near_high = (cur_price / high_max) >= 0.90 if high_max > 0 else False
 
-        # 눌림 패턴 (4시간봉)
+        # 눌림 패턴
         if len(df_4h) >= 5:
-            recent_4h   = df_4h.tail(5)
-            peak_idx    = recent_4h["Volume"].idxmax()
-            peak_loc    = recent_4h.index.get_loc(peak_idx)
-            peak_close  = float(recent_4h.loc[peak_idx, "Close"])
-            pullback    = peak_loc < len(recent_4h) - 1 and peak_close > 0 and (cur_price / peak_close) >= 0.97
+            recent_4h  = df_4h.tail(5)
+            peak_idx   = recent_4h["Volume"].idxmax()
+            peak_loc   = recent_4h.index.get_loc(peak_idx)
+            peak_close = float(recent_4h.loc[peak_idx, "Close"])
+            pullback   = peak_loc < len(recent_4h) - 1 and peak_close > 0 and (cur_price / peak_close) >= 0.97
         else:
             pullback = False
 
-        # 세력 펌핑 의심 (거래량 5배 이상)
+        # 세력 펌핑 의심
         pump_warning = vol_ratio_1h >= 5 or vol_ratio_15m >= 5
 
-        # ATR (4시간봉)
+        # ATR
         high_low   = df_4h["High"] - df_4h["Low"]
         high_close = (df_4h["High"] - df_4h["Close"].shift()).abs()
         low_close  = (df_4h["Low"] - df_4h["Close"].shift()).abs()
-        atr        = float(pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(14).mean().iloc[-1])
+        atr_val    = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(14).mean().iloc[-1]
+        atr        = float(atr_val) if atr_val == atr_val else cur_price * 0.03
 
         entry_price    = cur_price
         stop_loss      = round(cur_price - atr, 2)
@@ -367,49 +382,37 @@ def analyze_coin(market: str, ticker: dict) -> dict | None:
         if rr_ratio < 2.0:
             return None
 
-        # ==================================================
         # 점수 계산
-        # ==================================================
         score = 0
-
-        # 타임프레임 일치
-        if tf_bullish == 3:    score += 8  # 3개 모두 일치 보너스
+        if tf_bullish == 3:    score += 8
         elif tf_bullish == 2:  score += 4
         elif tf_bullish == 1:  score += 1
         else:                  score -= 2
 
-        # 4시간봉
         if above_ma_4h:        score += 3
         else:                  score -= 1
+
         if rsi_4h < 60:        score += 2
         elif rsi_4h < 65:      score += 1
-        elif rsi_4h < 70:      score += 0
-        elif rsi_4h < 75:      score -= 2
+        elif rsi_4h >= 70:     score -= 2
 
-        # 1시간봉 거래량
         if vol_ratio_1h > 3:   score += 3
         elif vol_ratio_1h > 2: score += 2
         elif vol_ratio_1h > 1.5: score += 1
 
-        # 15분봉
         if bullish_15m:        score += 2
         if vol_ratio_15m > 2:  score += 2
-
-        # 기타
         if near_high:          score += 3
         if pullback:           score += 2
-        if trade_value_억 > 500:  score += 3
+
+        if trade_value_억 > 500:   score += 3
         elif trade_value_억 > 100: score += 1
 
-        # 당일 변동률
         if 0 < change_pct < 5:    score += 3
         elif 5 <= change_pct < 10: score += 1
         elif change_pct >= 10:     score -= 1
 
-        # 세력 펌핑 감점
         if pump_warning:       score -= 3
-
-        # RSI 과열
         if rsi_4h >= 70:       score -= 2
 
         if score < 5:
@@ -417,7 +420,7 @@ def analyze_coin(market: str, ticker: dict) -> dict | None:
 
         print(f"  ✅ {market} | 점수:{score} | RSI4h:{rsi_4h} | TF:{tf_bullish}/3 | 펌핑:{'⚠️' if pump_warning else '✅'}")
 
-        return {
+        return sanitize_dict({
             "market":         market,
             "code":           code,
             "score":          score,
@@ -428,9 +431,9 @@ def analyze_coin(market: str, ticker: dict) -> dict | None:
             "rsi_1h":         rsi_1h,
             "rsi_15m":        rsi_15m,
             "above_ma_4h":    above_ma_4h,
-            "vol_ratio_4h":   round(vol_ratio_4h, 1),
-            "vol_ratio_1h":   round(vol_ratio_1h, 1),
-            "vol_ratio_15m":  round(vol_ratio_15m, 1),
+            "vol_ratio_4h":   vol_ratio_4h,
+            "vol_ratio_1h":   vol_ratio_1h,
+            "vol_ratio_15m":  vol_ratio_15m,
             "tf_bullish":     tf_bullish,
             "bullish_15m":    bullish_15m,
             "near_high":      near_high,
@@ -442,7 +445,7 @@ def analyze_coin(market: str, ticker: dict) -> dict | None:
             "target_price_2": target_price_2,
             "rr_ratio":       rr_ratio,
             "scanned_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
+        })
 
     except Exception as e:
         logging.error(f"코인 분석 실패 [{market}]: {e}")
@@ -451,34 +454,33 @@ def analyze_coin(market: str, ticker: dict) -> dict | None:
 # ==================================================
 # 판단 근거 생성
 # ==================================================
-def generate_verdict(stock: dict) -> dict:
-    score   = stock["score"]
+def generate_verdict(coin: dict) -> dict:
+    score   = coin["score"]
     reasons = []
     risks   = []
 
-    if stock["tf_bullish"] == 3:
+    if coin["tf_bullish"] == 3:
         reasons.append("4시간/1시간/15분 3개 타임프레임 모두 상승")
-    elif stock["tf_bullish"] == 2:
+    elif coin["tf_bullish"] == 2:
         reasons.append("2개 타임프레임 상승 일치")
-
-    if stock["above_ma_4h"]:
+    if coin["above_ma_4h"]:
         reasons.append("4시간봉 MA20 위 (상승 추세)")
-    if stock["vol_ratio_1h"] > 2:
-        reasons.append(f"1시간봉 거래량 {stock['vol_ratio_1h']}배 급증")
-    if stock["bullish_15m"]:
+    if coin["vol_ratio_1h"] > 2:
+        reasons.append(f"1시간봉 거래량 {coin['vol_ratio_1h']}배 급증")
+    if coin["bullish_15m"]:
         reasons.append("15분봉 양봉 전환 (단기 진입 신호)")
-    if stock["near_high"]:
+    if coin["near_high"]:
         reasons.append("고점 근접 (강한 모멘텀)")
-    if stock["pullback"]:
+    if coin["pullback"]:
         reasons.append("거래량 급등 후 가격 유지 (눌림 패턴)")
 
-    if stock["pump_warning"]:
+    if coin["pump_warning"]:
         risks.append("거래량 5배 이상 — 세력 펌핑 의심")
-    if stock["rsi_4h"] > 65:
-        risks.append(f"4시간봉 RSI {stock['rsi_4h']} (과열 구간)")
-    if stock["change_pct"] > 10:
-        risks.append(f"당일 {stock['change_pct']}% 급등 (추격 주의)")
-    if not stock["above_ma_4h"]:
+    if coin["rsi_4h"] > 65:
+        risks.append(f"4시간봉 RSI {coin['rsi_4h']} (과열 구간)")
+    if coin["change_pct"] > 10:
+        risks.append(f"당일 {coin['change_pct']}% 급등 (추격 주의)")
+    if not coin["above_ma_4h"]:
         risks.append("4시간봉 MA20 아래 (추세 약화)")
 
     if score >= 18:   verdict = "✅ 강력 추천"
@@ -492,25 +494,16 @@ def generate_verdict(stock: dict) -> dict:
 # Discord 포맷
 # ==================================================
 def format_coin_message(coin: dict, rank: int, market_status: dict) -> str:
-    verdict      = coin.get("verdict", "")
-    reasons      = coin.get("reasons", [])
-    risks        = coin.get("risks", [])
-    pump_warn    = "⚡ 펌핑의심" if coin["pump_warning"] else ""
-    overheat     = ""
+    verdict   = coin.get("verdict", "")
+    reasons   = coin.get("reasons", [])
+    risks     = coin.get("risks", [])
+    pump_warn = "⚡ 펌핑의심" if coin["pump_warning"] else ""
+    overheat  = ""
     if coin["rsi_4h"] >= 70 and coin["change_pct"] >= 10:
         overheat = f"🔥 과열주의 (RSI {coin['rsi_4h']} + 당일 {coin['change_pct']}%)"
 
     warn_line = "  ".join(filter(None, [pump_warn, overheat]))
-
-    fg        = market_status["fear_greed"]
-    fg_emoji  = "😱" if fg["value"] < 25 else "😰" if fg["value"] < 45 else "😐" if fg["value"] < 55 else "😊" if fg["value"] < 75 else "🤑"
-    btc       = market_status["btc"]
-    btc_emoji = "✅" if btc["bullish"] else "❌"
-    dom       = market_status["dominance"]
-    kp        = market_status["kimchi_premium"]
-    kp_warn   = "⚠️ 과열" if kp > 10 else "✅"
-
-    tf_bar = "".join(["✅" if i < coin["tf_bullish"] else "❌" for i in range(3)])
+    tf_bar    = "".join(["✅" if i < coin["tf_bullish"] else "❌" for i in range(3)])
 
     msg = (
         f"🪙 코인 감지 #{rank}"
@@ -518,11 +511,6 @@ def format_coin_message(coin: dict, rank: int, market_status: dict) -> str:
         f"\n\n"
         f"💎 종목: {coin['code']}/KRW\n"
         f"⭐ 점수: {coin['score']}점  {verdict}\n\n"
-        f"📊 시장 상황\n"
-        f"  BTC 추세: {btc_emoji} {'상승' if btc['bullish'] else '하락'} (RSI {btc['rsi']})\n"
-        f"  공포탐욕: {fg_emoji} {fg['value']} ({fg['label']})\n"
-        f"  BTC 도미넌스: {dom}%\n"
-        f"  김치프리미엄: {kp}% {kp_warn}\n\n"
         f"📈 타임프레임  {tf_bar}\n"
         f"  4시간봉: {'MA20 위 ✅' if coin['above_ma_4h'] else 'MA20 아래 ❌'}  RSI {coin['rsi_4h']}  거래량 {coin['vol_ratio_4h']}배\n"
         f"  1시간봉: 거래량 {coin['vol_ratio_1h']}배  RSI {coin['rsi_1h']}\n"
@@ -556,7 +544,7 @@ def main() -> None:
     start_time = time.time()
     now        = datetime.now()
     print("=" * 50)
-    print(f"🪙 코인 수급 탐지 스캐너 v1.0")
+    print(f"🪙 코인 수급 탐지 스캐너 v1.1")
     print(f"   실행 시각: {now.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
@@ -576,41 +564,33 @@ def main() -> None:
     print(f"  BTC 추세: {'상승 ✅' if btc_trend['bullish'] else '하락 ❌'} (RSI {btc_trend['rsi']})")
 
     market_status = {
-        "fear_greed":      fear_greed,
-        "dominance":       dominance,
-        "kimchi_premium":  kimchi,
-        "btc":             btc_trend,
+        "fear_greed":     fear_greed,
+        "dominance":      dominance,
+        "kimchi_premium": kimchi,
+        "btc":            btc_trend,
     }
 
-    # 시장 상황 점수
     market_score = sum([
         btc_trend["bullish"],
         25 <= fear_greed["value"] <= 75,
         kimchi < 10,
     ])
 
-    if market_score < 2:
-        msg = (
-            f"🚫 코인 시장 진입 금지\n\n"
-            f"  BTC 추세: {'상승 ✅' if btc_trend['bullish'] else '하락 ❌'}\n"
-            f"  공포탐욕: {fear_greed['value']} ({fear_greed['label']})\n"
-            f"  김치프리미엄: {kimchi}%\n\n"
-            f"  시장 상황 불량 — 다음 스캔 때 재확인합니다."
-        )
-        print("\n" + msg)
-        send_discord_message(msg)
-        return
+    # ③ 시장 상황 요약 Discord 전송
+    status_msg = format_market_status(market_status, market_score)
+    print("\n" + status_msg)
+    send_discord_message(status_msg)
 
-    # ③ 마켓 목록 조회
+    # ④ 마켓 목록 조회
     print("\n📋 업비트 원화 마켓 조회 중...")
     markets = get_upbit_markets()
     print(f"  총 {len(markets)}개 마켓")
 
-    # ④ 현재 시세 일괄 조회
+    # ⑤ 현재 시세 일괄 조회
     print("\n💰 현재 시세 조회 중...")
     tickers = get_ticker(markets)
 
-    # ⑤ 개별 코인 분석
+    # ⑥ 개별 코인 분석 (시장 불량이어도 스캔 진행)
     print(f"\n🔍 코인 분석 중...\n")
     results = []
     for i, market in enumerate(markets, 1):
@@ -619,7 +599,7 @@ def main() -> None:
             results.append(result)
         if i % 20 == 0:
             print(f"  진행: {i}/{len(markets)}")
-        time.sleep(0.15)  # API 레이트 리밋
+        time.sleep(0.15)
 
     results.sort(key=lambda x: x["score"], reverse=True)
     top_results = results[:10]
@@ -629,24 +609,37 @@ def main() -> None:
     print(f"  최종 후보: {len(results)}개 | 소요: {elapsed}초")
     print(f"{'='*50}\n")
 
+    # ⑦ JSON 저장
+    filename = f"coin_{now.strftime('%Y%m%d_%H%M')}.json"
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"  💾 결과 저장: {filename}")
+    except Exception as e:
+        logging.error(f"결과 저장 실패: {e}")
+
     if not top_results:
         msg = f"❌ 코인 감지 종목 없음 (스캔완료 {elapsed}초)"
         print(msg)
         send_discord_message(msg)
         return
 
-    # ⑥ 판단 근거 생성 + 중복 알림 필터
-    sent_count = 0
-    for stock in top_results:
-        verdict_info     = generate_verdict(stock)
-        stock["verdict"] = verdict_info["verdict"]
-        stock["reasons"] = verdict_info["reasons"]
-        stock["risks"]   = verdict_info["risks"]
+    # ⑧ 판단 근거 생성
+    for coin in top_results:
+        verdict_info    = generate_verdict(coin)
+        coin["verdict"] = verdict_info["verdict"]
+        coin["reasons"] = verdict_info["reasons"]
+        coin["risks"]   = verdict_info["risks"]
 
-    # ⑦ Discord 전송 (4시간 내 중복 알림 제외)
+    # ⑨ Discord 전송 (시장 불량이면 경고 포함, 4시간 중복 제외)
+    sent_count = 0
     for rank, coin in enumerate(top_results, start=1):
         if is_recently_alerted(coin["market"], alert_cache):
             print(f"  ⏭ {coin['market']} → 4시간 내 알림 생략")
+            continue
+
+        # 시장 불량이면 관망 이상만 전송
+        if market_score < 2 and coin["score"] < 13:
             continue
 
         message = format_coin_message(coin, rank, market_status)
@@ -657,9 +650,8 @@ def main() -> None:
         sent_count += 1
         time.sleep(0.3)
 
-    # ⑧ 알림 캐시 저장
+    # ⑩ 알림 캐시 저장
     save_alert_cache(alert_cache)
-
     print(f"\n✅ 완료 | 전송: {sent_count}개 | 소요: {elapsed}초")
 
 
