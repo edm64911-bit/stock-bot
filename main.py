@@ -1,14 +1,16 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v2.6
+  초기 수급 탐지 스캐너 v2.7
   변경사항:
-    - Groq 모델 하드코딩 제거
-    - API에서 사용 가능한 모델 자동 선택
+    - Groq JSON 파싱 강화
+    - 정규식으로 JSON 블록 추출
+    - 파싱 실패 시 텍스트에서 verdict 키워드 추출
 ===================================================
 """
 
 import os
 import sys
+import re
 import time
 import logging
 import traceback
@@ -211,10 +213,6 @@ def analyze_news(name: str) -> tuple:
 # Groq 사용 가능한 모델 자동 선택
 # ==================================================
 def get_best_groq_model() -> str:
-    """
-    Groq API에서 사용 가능한 모델 목록을 가져와서
-    우선순위대로 자동 선택
-    """
     priority = [
         "llama-3.3-70b-versatile",
         "llama3-70b-8192",
@@ -223,7 +221,6 @@ def get_best_groq_model() -> str:
         "mixtral-8x7b-32768",
         "gemma2-9b-it",
     ]
-
     try:
         resp = requests.get(
             "https://api.groq.com/openai/v1/models",
@@ -239,7 +236,6 @@ def get_best_groq_model() -> str:
                 print(f"  ✅ 선택된 모델: {model}")
                 return model
 
-        # 우선순위에 없으면 첫 번째 모델 사용
         first = sorted(available)[0]
         print(f"  ⚠️ 우선순위 모델 없음 → 기본 사용: {first}")
         return first
@@ -250,41 +246,77 @@ def get_best_groq_model() -> str:
         return "llama3-70b-8192"
 
 # ==================================================
+# JSON 안전 파싱 (강화 버전)
+# ==================================================
+def safe_parse_groq_response(content: str) -> dict:
+    """
+    AI 응답에서 JSON 추출 — 3단계 시도
+    1. 그대로 파싱
+    2. 정규식으로 JSON 블록 추출 후 파싱
+    3. 텍스트에서 verdict 키워드 직접 추출
+    """
+    # 1단계: 마크다운 제거 후 직접 파싱
+    cleaned = content.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    # 2단계: 정규식으로 { } 블록 추출
+    match = re.search(r'\{[^{}]+\}', content, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except Exception:
+            pass
+
+    # 3단계: 텍스트에서 verdict 키워드 직접 추출
+    verdict = "관망"
+    if "진입추천" in content or "진입 추천" in content:
+        verdict = "진입추천"
+    elif "진입금지" in content or "진입 금지" in content:
+        verdict = "진입금지"
+
+    # reason 추출 시도
+    reason = ""
+    risk   = ""
+    lines  = [l.strip() for l in content.split("\n") if l.strip()]
+    if len(lines) > 1:
+        reason = lines[1][:100]
+    if len(lines) > 2:
+        risk = lines[2][:100]
+
+    return {"verdict": verdict, "reason": reason, "risk": risk}
+
+# ==================================================
 # Groq AI 분석
 # ==================================================
 def analyze_with_groq(stock: dict, model: str) -> dict:
     if not GROQ_API_KEY:
         return {"verdict": "분석불가", "reason": "GROQ_API_KEY 미설정", "risk": ""}
 
-    prompt = f"""
-당신은 한국 주식 단기 트레이딩 전문가입니다.
-아래 종목 데이터를 분석하고 진입 여부를 판단해 주세요.
-
-[종목 정보]
-- 종목명: {stock['name']} ({stock['code']})
-- 당일 상승률: {stock['change']}%
-- 5일 상승률: {stock['five_day_change']}%
-- 거래량 증가: {stock['volume_ratio']}배
-- 거래대금: {stock['trading_value']}억
-- RSI: {stock['rsi']}
-- MA20 위치: {'MA20 위' if stock['above_ma20'] else 'MA20 아래'}
-- 상대강도 (vs KOSPI): {stock['relative_strength']:+.1f}%
-- 캔들 패턴: {stock['candle']}
-- 52주 신고가 근접: {'예' if stock['near_52w_high'] else '아니오'}
-- 눌림 패턴: {'예' if stock['vol_consolidation'] else '아니오'}
-- 외국인 3일 순매수: {stock['foreign_net']:+,}주
-- 기관 3일 순매수: {stock['institution_net']:+,}주
-- 섹터 ETF 강세: {'예' if stock['sector_bullish'] else '아니오'}
-- 테마: {', '.join(stock['themes']) if stock['themes'] else '없음'}
-- 진입가: {stock['entry_price']:,}원
-- 1차 목표: {stock['target_price_1']:,}원
-- 2차 목표: {stock['target_price_2']:,}원
-- 손절가: {stock['stop_loss']:,}원
-- RR: 1:{stock['rr_ratio']}
-
-아래 JSON 형식으로만 답변하세요. 다른 텍스트는 절대 포함하지 마세요:
-{{"verdict": "진입추천" 또는 "관망" 또는 "진입금지", "reason": "진입 판단 근거 2~3줄", "risk": "주요 리스크 1~2줄"}}
-"""
+    prompt = (
+        f"당신은 한국 주식 단기 트레이딩 전문가입니다.\n"
+        f"아래 종목 데이터를 분석하고 JSON으로만 답변하세요.\n\n"
+        f"종목명: {stock['name']} ({stock['code']})\n"
+        f"당일 상승률: {stock['change']}%\n"
+        f"5일 상승률: {stock['five_day_change']}%\n"
+        f"거래량 증가: {stock['volume_ratio']}배\n"
+        f"거래대금: {stock['trading_value']}억\n"
+        f"RSI: {stock['rsi']}\n"
+        f"MA20: {'위' if stock['above_ma20'] else '아래'}\n"
+        f"상대강도: {stock['relative_strength']:+.1f}%\n"
+        f"캔들: {stock['candle']}\n"
+        f"52주 신고가 근접: {'예' if stock['near_52w_high'] else '아니오'}\n"
+        f"눌림 패턴: {'예' if stock['vol_consolidation'] else '아니오'}\n"
+        f"외국인 3일: {stock['foreign_net']:+,}주\n"
+        f"기관 3일: {stock['institution_net']:+,}주\n"
+        f"섹터 강세: {'예' if stock['sector_bullish'] else '아니오'}\n"
+        f"테마: {', '.join(stock['themes']) if stock['themes'] else '없음'}\n"
+        f"진입가: {stock['entry_price']:,}원 / 손절: {stock['stop_loss']:,}원 / RR: 1:{stock['rr_ratio']}\n\n"
+        f"반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이:\n"
+        f'{"{"}"verdict": "진입추천" 또는 "관망" 또는 "진입금지", "reason": "근거 2줄", "risk": "리스크 1줄"{"}"}'
+    )
 
     try:
         resp = requests.post(
@@ -295,17 +327,25 @@ def analyze_with_groq(stock: dict, model: str) -> dict:
             },
             json={
                 "model":       model,
-                "messages":    [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-                "max_tokens":  300,
+                "messages":    [
+                    {
+                        "role":    "system",
+                        "content": "You must respond only with valid JSON. No markdown, no explanation, no extra text."
+                    },
+                    {
+                        "role":    "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature":    0.1,
+                "max_tokens":     300,
+                "response_format": {"type": "json_object"},
             },
             timeout=15
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
-        content = content.replace("```json", "").replace("```", "").strip()
-        result  = json.loads(content)
-        return result
+        return safe_parse_groq_response(content)
 
     except Exception as e:
         logging.error(f"Groq 분석 오류 [{stock['name']}]: {e}")
@@ -570,7 +610,7 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v2.6")
+    print(f"🚀 초기 수급 탐지 스캐너 v2.7")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
