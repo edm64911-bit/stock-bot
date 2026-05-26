@@ -1,11 +1,15 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v3.0
+  초기 수급 탐지 스캐너 v3.1
   변경사항:
-    - AI 분석 제거
-    - 점수 기반 자동 추천/관망/비추천 판단
-    - 판단 근거 자동 생성
-    - 점수 구간별 등급 표시
+    - 시총 구간별 분석 (소형/중형/대형)
+    - 구간별 거래량 기준 차등 적용
+    - 우선주 필터 강화
+    - 기관 3일 하드코딩 버그 수정
+    - positions.json 중복 체크 수정 (진행중만)
+    - 눌림 패턴 로직 수정
+    - 거래량 표현 기준 조정
+    - 섹터 ETF 테마 없음 처리 개선
 ===================================================
 """
 
@@ -58,6 +62,33 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 # ==================================================
 TODAY      = datetime.today()
 START_DATE = (TODAY - timedelta(days=365)).strftime("%Y-%m-%d")
+
+# ==================================================
+# 시총 구간 정의
+# ==================================================
+GROUPS = {
+    "소형": {
+        "min":          50_000_000_000,     # 500억
+        "max":          300_000_000_000,    # 3000억
+        "limit":        400,
+        "vol_min":      2.0,                # 거래량 최소 2배
+        "amount_min":   5_000_000_000,      # 거래대금 최소 50억
+    },
+    "중형": {
+        "min":          300_000_000_000,    # 3000억
+        "max":          1_000_000_000_000,  # 1조
+        "limit":        400,
+        "vol_min":      1.5,
+        "amount_min":   3_000_000_000,      # 30억
+    },
+    "대형": {
+        "min":          1_000_000_000_000,  # 1조
+        "max":          5_000_000_000_000,  # 5조
+        "limit":        400,
+        "vol_min":      1.3,
+        "amount_min":   3_000_000_000,      # 30억
+    },
+}
 
 # ==================================================
 # 테마 키워드
@@ -139,13 +170,30 @@ def check_candle_pattern(data: pd.DataFrame) -> str:
 def is_near_52w_high(data: pd.DataFrame, threshold: float = 0.90) -> bool:
     return (data["Close"].iloc[-1] / data["Close"].tail(252).max()) >= threshold
 
+# ==================================================
+# 눌림 패턴 로직 수정
+# 거래량 급등 후 가격이 빠지지 않고 유지되는지 확인
+# ==================================================
 def check_volume_consolidation(data: pd.DataFrame) -> bool:
-    recent    = data.tail(5)
-    top2_idx  = recent["Volume"].nlargest(2).index
-    avg_price = recent.loc[top2_idx, "Close"].mean()
-    if avg_price <= 0:
+    if len(data) < 5:
         return False
-    return (data["Close"].iloc[-1] / avg_price) >= 0.97
+    recent      = data.tail(5)
+    today_close = float(data["Close"].iloc[-1])
+
+    # 최근 5일 중 거래량 1위 날
+    peak_idx    = recent["Volume"].idxmax()
+    peak_loc    = recent.index.get_loc(peak_idx)
+
+    # 거래량 피크가 오늘이면 눌림 아님
+    if peak_loc == len(recent) - 1:
+        return False
+
+    # 거래량 피크 이후 가격이 피크 종가 대비 3% 이내 유지
+    peak_close  = float(recent.loc[peak_idx, "Close"])
+    if peak_close <= 0:
+        return False
+
+    return (today_close / peak_close) >= 0.97
 
 def get_relative_strength(stock_5d: float, kospi_data) -> float:
     if kospi_data is None or len(kospi_data) < 6:
@@ -167,8 +215,9 @@ def get_investor_sentiment(code: str) -> dict:
         return {"foreign": 0, "institution": 0}
 
 def is_sector_etf_bullish(themes: list, etf_cache: dict) -> bool:
+    # 테마 없으면 섹터 판단 중립 (True/False 아닌 None)
     if not themes:
-        return True
+        return None
     for theme in themes:
         etf_code = SECTOR_ETFS.get(theme)
         if etf_code and etf_code in etf_cache:
@@ -209,53 +258,68 @@ def analyze_news(name: str) -> tuple:
         return [], []
 
 # ==================================================
+# 우선주 필터 강화
+# ==================================================
+def is_preferred_stock(name: str) -> bool:
+    suffixes = ["우", "우B", "우C", "2우", "3우", "2우B", "3우B"]
+    return any(name.endswith(s) for s in suffixes)
+
+# ==================================================
 # 점수 기반 판단 근거 자동 생성
 # ==================================================
 def generate_verdict(stock: dict) -> dict:
-    score      = stock["score"]
-    reasons    = []
-    risks      = []
+    score   = stock["score"]
+    reasons = []
+    risks   = []
 
     # 추천 근거
-    if stock["volume_ratio"] > 3:
-        reasons.append(f"거래량 {stock['volume_ratio']}배 급증 (강한 수급 유입)")
-    elif stock["volume_ratio"] > 2:
-        reasons.append(f"거래량 {stock['volume_ratio']}배 증가 (수급 유입 신호)")
-    elif stock["volume_ratio"] > 1.5:
-        reasons.append(f"거래량 {stock['volume_ratio']}배 소폭 증가")
+    vr = stock["volume_ratio"]
+    if vr > 3:
+        reasons.append(f"거래량 {vr}배 급증 (강한 수급 유입)")
+    elif vr > 1.5:
+        reasons.append(f"거래량 {vr}배 증가 (수급 유입 신호)")
+    else:
+        reasons.append(f"거래량 {vr}배 증가")
 
     if stock["above_ma20"]:
-        reasons.append("MA20 위에서 유지 (상승 추세)")
+        reasons.append("MA20 위 유지 (상승 추세)")
     if stock["near_52w_high"]:
         reasons.append("52주 신고가 근접 (강한 모멘텀)")
     if stock["vol_consolidation"]:
         reasons.append("거래량 급등 후 가격 유지 (눌림 패턴)")
     if stock["relative_strength"] > 5:
-        reasons.append(f"시장 대비 +{stock['relative_strength']}% 초과 상승 (강한 상대강도)")
+        reasons.append(f"시장 대비 +{stock['relative_strength']}% 초과 상승")
     if stock["foreign_net"] > 0:
         reasons.append(f"외국인 3일 순매수 {stock['foreign_net']:,}주")
     if stock["institution_net"] > 0:
         reasons.append(f"기관 3일 순매수 {stock['institution_net']:,}주")
     if stock["themes"]:
-        reasons.append(f"{', '.join(stock['themes'])} 테마 (섹터 모멘텀)")
+        reasons.append(f"{', '.join(stock['themes'])} 테마")
     if stock["candle"] == "장대양봉":
         reasons.append("장대양봉 (강한 매수세)")
     elif stock["candle"] == "아랫꼬리양봉":
-        reasons.append("아랫꼬리양봉 (저점 매수세 유입)")
+        reasons.append("아랫꼬리양봉 (저점 매수세)")
 
     # 리스크
     if stock["five_day_change"] > 15:
         risks.append(f"5일 상승률 {stock['five_day_change']}% (단기 급등 부담)")
+    if stock["change"] > 10:
+        risks.append(f"당일 {stock['change']}% 급등 (추격 매수 주의)")
     if stock["rsi"] > 65:
         risks.append(f"RSI {stock['rsi']} (과열 구간 접근)")
     if not stock["above_ma20"]:
-        risks.append("MA20 하향 돌파 (추세 약화)")
-    if not stock["sector_bullish"]:
+        risks.append("MA20 하향 (추세 약화)")
+    if stock["sector_bullish"] is False:
         risks.append("섹터 ETF 약세 (섹터 역행)")
     if stock["candle"] == "윗꼬리음봉":
-        risks.append("윗꼬리음봉 (매도 압력 존재)")
+        risks.append("윗꼬리음봉 (매도 압력)")
     if stock["relative_strength"] < 0:
-        risks.append(f"시장 대비 {stock['relative_strength']}% 하회 (상대강도 약함)")
+        risks.append(f"시장 대비 {stock['relative_strength']}% 하회")
+
+    # 구간별 추가 정보
+    group = stock.get("group", "")
+    if group == "소형":
+        risks.append("소형주 — 변동성 크므로 포지션 사이즈 주의")
 
     # 판단
     if score >= 18:
@@ -269,20 +333,22 @@ def generate_verdict(stock: dict) -> dict:
 
     return {
         "verdict": verdict,
-        "reasons": reasons[:3],   # 상위 3개만
-        "risks":   risks[:2],     # 상위 2개만
+        "reasons": reasons[:3],
+        "risks":   risks[:2],
     }
 
 # ==================================================
 # 종목 분석
 # ==================================================
-def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
+def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) -> dict | None:
     code = row["Code"]
     name = row["Name"]
+
     try:
-        if "ETF" in name or name.endswith("우"):
+        # 기본 필터
+        if "ETF" in name:
             return None
-        if row["Marcap"] > 5_000_000_000_000:
+        if is_preferred_stock(name):
             return None
 
         data = fdr.DataReader(code, START_DATE)
@@ -307,9 +373,11 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
 
         volume_ratio  = today_volume / avg_volume
         trading_value = today_close * today_volume
-        if volume_ratio < 1.3:
+
+        # 구간별 거래량/거래대금 기준 적용
+        if volume_ratio < group_cfg["vol_min"]:
             return None
-        if trading_value < 3_000_000_000:
+        if trading_value < group_cfg["amount_min"]:
             return None
 
         today_rsi = calculate_rsi(data["Close"])
@@ -341,6 +409,7 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
         news_titles, detected_themes = analyze_news(name)
         sector_bullish    = is_sector_etf_bullish(detected_themes, etf_cache)
 
+        # 점수 계산
         score = 0
         if volume_ratio > 3:           score += 5
         elif volume_ratio > 2:         score += 3
@@ -360,19 +429,24 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
         elif relative_strength > 2:    score += 1
         if investor["foreign"] > 0:    score += 3
         if investor["institution"] > 0:score += 2
-        if not sector_bullish:         score -= 3
+        if sector_bullish is False:    score -= 3   # None이면 감점 없음
         if candle == "장대양봉":           score += 3
         elif candle == "아랫꼬리양봉":     score += 2
         elif candle == "윗꼬리음봉":       score -= 2
 
+        # 소형주 거래량 추가 점수
+        if group_name == "소형" and volume_ratio >= 2.0:
+            score += 2
+
         if score < 3:
             return None
 
-        print(f"  ✅ {name} | 점수:{score} | RSI:{today_rsi} | 거래량:{volume_ratio:.1f}배 | 캔들:{candle}")
+        print(f"  ✅ [{group_name}] {name} | 점수:{score} | RSI:{today_rsi} | 거래량:{volume_ratio:.1f}배 | 캔들:{candle}")
 
         return {
             "name":              name,
             "code":              code,
+            "group":             group_name,
             "score":             score,
             "change":            round(change_pct, 2),
             "five_day_change":   round(five_day_change, 2),
@@ -416,7 +490,7 @@ def save_results(results: list) -> None:
         logging.error(f"결과 저장 실패: {e}")
 
 # ==================================================
-# tracker 연동
+# tracker 연동 (진행중인 것만 중복 체크)
 # ==================================================
 def save_positions(top_results: list) -> None:
     filename = "positions.json"
@@ -427,7 +501,8 @@ def save_positions(top_results: list) -> None:
         else:
             positions = []
 
-        existing_codes = {p["code"] for p in positions}
+        # 진행중인 것만 중복 체크
+        existing_codes = {p["code"] for p in positions if p["status"] == "진행중"}
 
         for stock in top_results:
             if stock["code"] in existing_codes:
@@ -437,6 +512,7 @@ def save_positions(top_results: list) -> None:
             positions.append({
                 "code":           stock["code"],
                 "name":           stock["name"],
+                "group":          stock.get("group", ""),
                 "entry_price":    stock["entry_price"],
                 "stop_loss":      stock["stop_loss"],
                 "target_price_1": stock["target_price_1"],
@@ -464,21 +540,28 @@ def format_discord_message(stock: dict, rank: int) -> str:
         "보통":        "➖ 보통",
     }.get(stock["candle"], "➖ 보통")
 
+    sector_str = ""
+    if stock["sector_bullish"] is True:
+        sector_str = ""
+    elif stock["sector_bullish"] is False:
+        sector_str = "⚠️ 섹터역행"
+
     flags = " ".join(filter(None, [
         "🔑 신고가 근접"                              if stock["near_52w_high"]         else "",
         "🧱 눌림 패턴"                                if stock["vol_consolidation"]      else "",
         f"📡 시장대비 +{stock['relative_strength']}%" if stock["relative_strength"] > 2  else "",
         "📊 MA20 위"                                  if stock["above_ma20"]             else "📊 MA20 아래",
-        "⚠️ 섹터역행"                                 if not stock["sector_bullish"]     else "",
+        sector_str,
     ]))
 
-    verdict  = stock.get("verdict", "")
-    reasons  = stock.get("reasons", [])
-    risks    = stock.get("risks", [])
+    group_emoji = {"소형": "🔹", "중형": "🔷", "대형": "🔶"}.get(stock.get("group", ""), "")
+    verdict     = stock.get("verdict", "")
+    reasons     = stock.get("reasons", [])
+    risks       = stock.get("risks", [])
 
     msg = (
         f"🚨 수급 감지 #{rank}\n\n"
-        f"🔥 종목: {stock['name']} ({stock['code']})\n"
+        f"🔥 종목: {stock['name']} ({stock['code']})  {group_emoji}{stock.get('group','')}주\n"
         f"⭐ 점수: {stock['score']}점  {verdict}\n\n"
         f"{candle_emoji}\n"
         f"{flags}\n\n"
@@ -529,7 +612,7 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v3.0")
+    print(f"🚀 초기 수급 탐지 스캐너 v3.1")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
@@ -546,19 +629,40 @@ def main() -> None:
     print("\n📦 섹터 ETF 로딩 중...")
     etf_cache = load_etf_cache()
 
-    # ④ 종목 리스트
+    # ④ 전체 종목 로딩
     print("\n📋 KRX 종목 로딩 중...")
-    stocks = fdr.StockListing("KRX")
-    stocks = stocks[stocks["Market"].isin(["KOSPI", "KOSDAQ"])]
-    stocks = stocks[stocks["Marcap"] > 50_000_000_000]
-    stocks = stocks.sort_values(by="Marcap", ascending=False).head(400)
-    print(f"  분석 대상: {len(stocks)}개\n")
+    all_stocks = fdr.StockListing("KRX")
+    all_stocks = all_stocks[all_stocks["Market"].isin(["KOSPI", "KOSDAQ"])]
 
+    # ⑤ 구간별 종목 분리
+    target_stocks = []
+    for group_name, cfg in GROUPS.items():
+        group = all_stocks[
+            (all_stocks["Marcap"] >= cfg["min"]) &
+            (all_stocks["Marcap"] <  cfg["max"])
+        ].sort_values(by="Marcap", ascending=False).head(cfg["limit"])
+        group = group.copy()
+        group["_group"]     = group_name
+        group["_group_cfg"] = [cfg] * len(group)
+        target_stocks.append(group)
+        print(f"  {group_name}주: {len(group)}개")
+
+    combined = pd.concat(target_stocks)
+    print(f"  총 분석 대상: {len(combined)}개\n")
+
+    # ⑥ 멀티스레드 분석
     results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {
-            executor.submit(analyze_stock, row, kospi_data, etf_cache): row["Name"]
-            for _, row in stocks.iterrows()
+            executor.submit(
+                analyze_stock,
+                row,
+                kospi_data,
+                etf_cache,
+                row["_group_cfg"],
+                row["_group"]
+            ): row["Name"]
+            for _, row in combined.iterrows()
         }
         for future in as_completed(futures):
             result = future.result()
@@ -580,20 +684,20 @@ def main() -> None:
         send_discord_message(msg)
         return
 
-    # ⑤ 판단 근거 생성
+    # ⑦ 판단 근거 생성
     for stock in top_results:
         verdict_info      = generate_verdict(stock)
         stock["verdict"]  = verdict_info["verdict"]
         stock["reasons"]  = verdict_info["reasons"]
         stock["risks"]    = verdict_info["risks"]
 
-    # ⑥ JSON 저장
+    # ⑧ JSON 저장
     save_results(results)
 
-    # ⑦ positions 저장
+    # ⑨ positions 저장
     save_positions(top_results)
 
-    # ⑧ Discord 전송
+    # ⑩ Discord 전송
     for rank, stock in enumerate(top_results, start=1):
         message = format_discord_message(stock, rank)
         print(message)
