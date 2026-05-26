@@ -15,7 +15,7 @@ from concurrent.futures import (
 # 디스코드 웹훅
 # ==================================================
 WEBHOOK_URL = os.getenv(
-    "https://discord.com/api/webhooks/1507283857643143168/lcTH5vRk94YHIxb0zCf9Q7RJmqb2gse3sPcVsUp9FbnMPrm_pTgs16FnfWFmJY5QLCrf"
+    "WEBHOOK_URL"
 )
 
 # ==================================================
