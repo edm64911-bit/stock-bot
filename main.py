@@ -1,10 +1,9 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v2.5
+  초기 수급 탐지 스캐너 v2.6
   변경사항:
-    - Groq AI 분석 추가 (종목별 진입 판단)
-    - 진입 추천 / 관망 / 진입 금지 판단
-    - AI 분석 근거 + 리스크 Discord 전송
+    - Groq 모델 하드코딩 제거
+    - API에서 사용 가능한 모델 자동 선택
 ===================================================
 """
 
@@ -209,13 +208,51 @@ def analyze_news(name: str) -> tuple:
         return [], []
 
 # ==================================================
+# Groq 사용 가능한 모델 자동 선택
+# ==================================================
+def get_best_groq_model() -> str:
+    """
+    Groq API에서 사용 가능한 모델 목록을 가져와서
+    우선순위대로 자동 선택
+    """
+    priority = [
+        "llama-3.3-70b-versatile",
+        "llama3-70b-8192",
+        "llama-3.1-70b-versatile",
+        "llama3-8b-8192",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it",
+    ]
+
+    try:
+        resp = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            timeout=10
+        )
+        resp.raise_for_status()
+        available = {m["id"] for m in resp.json().get("data", [])}
+        print(f"  Groq 사용 가능 모델: {len(available)}개")
+
+        for model in priority:
+            if model in available:
+                print(f"  ✅ 선택된 모델: {model}")
+                return model
+
+        # 우선순위에 없으면 첫 번째 모델 사용
+        first = sorted(available)[0]
+        print(f"  ⚠️ 우선순위 모델 없음 → 기본 사용: {first}")
+        return first
+
+    except Exception as e:
+        logging.error(f"Groq 모델 목록 조회 실패: {e}")
+        print(f"  ⚠️ 모델 목록 조회 실패 → llama3-70b-8192 사용")
+        return "llama3-70b-8192"
+
+# ==================================================
 # Groq AI 분석
 # ==================================================
-def analyze_with_groq(stock: dict) -> dict:
-    """
-    Groq AI로 종목 진입 판단
-    반환: {"verdict": "진입추천"|"관망"|"진입금지", "reason": str, "risk": str}
-    """
+def analyze_with_groq(stock: dict, model: str) -> dict:
     if not GROQ_API_KEY:
         return {"verdict": "분석불가", "reason": "GROQ_API_KEY 미설정", "risk": ""}
 
@@ -257,17 +294,15 @@ def analyze_with_groq(stock: dict) -> dict:
                 "Content-Type": "application/json"
             },
             json={
-                "model": "llama3-70b-8192",
-                "messages": [{"role": "user", "content": prompt}],
+                "model":       model,
+                "messages":    [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": 300,
+                "max_tokens":  300,
             },
             timeout=15
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
-
-        # JSON 파싱
         content = content.replace("```json", "").replace("```", "").strip()
         result  = json.loads(content)
         return result
@@ -345,28 +380,28 @@ def analyze_stock(row, kospi_data, etf_cache) -> dict | None:
         sector_bullish    = is_sector_etf_bullish(detected_themes, etf_cache)
 
         score = 0
-        if volume_ratio > 3:       score += 5
-        elif volume_ratio > 2:     score += 3
-        elif volume_ratio > 1.5:   score += 1
-        if 0 < change_pct < 5:     score += 3
-        elif change_pct >= 5:      score += 1
-        if today_rsi < 60:         score += 2
-        elif today_rsi < 70:       score += 1
-        if trading_value > 10_000_000_000:   score += 3
-        elif trading_value > 5_000_000_000:  score += 1
+        if volume_ratio > 3:           score += 5
+        elif volume_ratio > 2:         score += 3
+        elif volume_ratio > 1.5:       score += 1
+        if 0 < change_pct < 5:         score += 3
+        elif change_pct >= 5:          score += 1
+        if today_rsi < 60:             score += 2
+        elif today_rsi < 70:           score += 1
+        if trading_value > 10_000_000_000:  score += 3
+        elif trading_value > 5_000_000_000: score += 1
         score += len(detected_themes) * 2
-        if near_52w_high:          score += 3
-        if vol_consolidation:      score += 2
-        if above_ma20:             score += 2
-        else:                      score -= 1
-        if relative_strength > 5:  score += 3
-        elif relative_strength > 2:score += 1
+        if near_52w_high:              score += 3
+        if vol_consolidation:          score += 2
+        if above_ma20:                 score += 2
+        else:                          score -= 1
+        if relative_strength > 5:      score += 3
+        elif relative_strength > 2:    score += 1
         if investor["foreign"] > 0:    score += 3
         if investor["institution"] > 0:score += 2
-        if not sector_bullish:     score -= 3
-        if candle == "장대양봉":       score += 3
-        elif candle == "아랫꼬리양봉": score += 2
-        elif candle == "윗꼬리음봉":   score -= 2
+        if not sector_bullish:         score -= 3
+        if candle == "장대양봉":           score += 3
+        elif candle == "아랫꼬리양봉":     score += 2
+        elif candle == "윗꼬리음봉":       score -= 2
 
         if score < 3:
             return None
@@ -435,7 +470,6 @@ def save_positions(top_results: list) -> None:
         for stock in top_results:
             if stock["code"] in existing_codes:
                 continue
-            # AI 진입추천 종목만 포지션 저장
             if stock.get("ai_verdict") == "진입금지":
                 continue
             positions.append({
@@ -476,11 +510,17 @@ def format_discord_message(stock: dict, rank: int) -> str:
         "⚠️ 섹터역행"                                 if not stock["sector_bullish"]     else "",
     ]))
 
-    # AI 판단 이모지
     verdict       = stock.get("ai_verdict", "")
-    verdict_emoji = {"진입추천": "✅", "관망": "⚠️", "진입금지": "❌", "분석실패": "❓"}.get(verdict, "❓")
-    ai_reason     = stock.get("ai_reason", "")
-    ai_risk       = stock.get("ai_risk", "")
+    verdict_emoji = {
+        "진입추천": "✅",
+        "관망":     "⚠️",
+        "진입금지": "❌",
+        "분석실패": "❓",
+        "분석불가": "❓",
+    }.get(verdict, "❓")
+
+    ai_reason = stock.get("ai_reason", "")
+    ai_risk   = stock.get("ai_risk", "")
 
     msg = (
         f"🚨 수급 감지 #{rank}\n\n"
@@ -530,7 +570,7 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v2.5")
+    print(f"🚀 초기 수급 탐지 스캐너 v2.6")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
@@ -581,23 +621,27 @@ def main() -> None:
         send_discord_message(msg)
         return
 
-    # ⑤ Groq AI 분석
+    # ⑤ Groq 모델 자동 선택
+    print("\n🤖 Groq 모델 선택 중...")
+    groq_model = get_best_groq_model()
+
+    # ⑥ Groq AI 분석
     print("\n🤖 Groq AI 분석 중...")
     for stock in top_results:
-        ai_result = analyze_with_groq(stock)
+        ai_result = analyze_with_groq(stock, groq_model)
         stock["ai_verdict"] = ai_result.get("verdict", "분석실패")
         stock["ai_reason"]  = ai_result.get("reason", "")
         stock["ai_risk"]    = ai_result.get("risk", "")
         print(f"  {stock['name']} → {stock['ai_verdict']}")
-        time.sleep(0.5)  # Groq API 레이트 리밋 방지
+        time.sleep(0.5)
 
-    # ⑥ JSON 저장
+    # ⑦ JSON 저장
     save_results(results)
 
-    # ⑦ positions 저장 (AI 진입금지 제외)
+    # ⑧ positions 저장
     save_positions(top_results)
 
-    # ⑧ Discord 전송
+    # ⑨ Discord 전송
     for rank, stock in enumerate(top_results, start=1):
         message = format_discord_message(stock, rank)
         print(message)
