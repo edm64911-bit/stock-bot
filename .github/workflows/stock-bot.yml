@@ -6,6 +6,9 @@ on:
 
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   run-bot:
 
@@ -18,10 +21,12 @@ jobs:
 
       - name: Python 설치
         uses: actions/setup-python@v5
+
         with:
           python-version: '3.11'
 
       - name: 라이브러리 설치
+
         run: |
           pip install finance-datareader
           pip install yfinance
@@ -31,4 +36,8 @@ jobs:
           pip install numpy
 
       - name: 봇 실행
+
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+
         run: python main.py
