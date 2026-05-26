@@ -258,6 +258,22 @@ def analyze_news(name: str) -> tuple:
         return [], []
 
 # ==================================================
+# 뉴스성 단발 급등 키워드 감지
+# ==================================================
+NEWS_EVENT_KEYWORDS = [
+    "수주", "계약", "MOU", "특허", "인수", "합병",
+    "FDA", "임상", "허가", "공시", "유상증자", "전환사채",
+    "거래정지", "불성실", "감사의견", "횡령", "배임",
+]
+
+def has_event_news(titles: list) -> bool:
+    for title in titles:
+        cleaned = clean_text(title)
+        if any(clean_text(kw) in cleaned for kw in NEWS_EVENT_KEYWORDS):
+            return True
+    return False
+
+# ==================================================
 # 우선주 필터 강화
 # ==================================================
 def is_preferred_stock(name: str) -> bool:
@@ -315,6 +331,8 @@ def generate_verdict(stock: dict) -> dict:
         risks.append("윗꼬리음봉 (매도 압력)")
     if stock["relative_strength"] < 0:
         risks.append(f"시장 대비 {stock['relative_strength']}% 하회")
+    if stock.get("event_news"):
+        risks.append("수주/계약 등 단발성 뉴스 — 다음날 빠질 수 있음")
 
     # 구간별 추가 정보
     group = stock.get("group", "")
@@ -408,28 +426,51 @@ def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) 
         investor          = get_investor_sentiment(code)
         news_titles, detected_themes = analyze_news(name)
         sector_bullish    = is_sector_etf_bullish(detected_themes, etf_cache)
+        event_news        = has_event_news(news_titles)
 
         # 점수 계산
         score = 0
+
+        # 거래량
         if volume_ratio > 3:           score += 5
         elif volume_ratio > 2:         score += 3
         elif volume_ratio > 1.5:       score += 1
+
+        # 당일 상승률
         if 0 < change_pct < 5:         score += 3
         elif change_pct >= 5:          score += 1
+
+        # RSI 세분화
         if today_rsi < 60:             score += 2
-        elif today_rsi < 70:           score += 1
+        elif today_rsi < 65:           score += 1
+        elif today_rsi < 70:           score += 0  # 중립
+        elif today_rsi < 75:           score -= 2  # 과열 구간 감점
+
+        # 거래대금
         if trading_value > 10_000_000_000:  score += 3
         elif trading_value > 5_000_000_000: score += 1
+
+        # 테마
         score += len(detected_themes) * 2
+
+        # 차트 패턴
         if near_52w_high:              score += 3
         if vol_consolidation:          score += 2
         if above_ma20:                 score += 2
         else:                          score -= 1
+
+        # 상대강도
         if relative_strength > 5:      score += 3
         elif relative_strength > 2:    score += 1
+
+        # 수급
         if investor["foreign"] > 0:    score += 3
         if investor["institution"] > 0:score += 2
-        if sector_bullish is False:    score -= 3   # None이면 감점 없음
+
+        # 섹터
+        if sector_bullish is False:    score -= 3  # None이면 감점 없음
+
+        # 캔들
         if candle == "장대양봉":           score += 3
         elif candle == "아랫꼬리양봉":     score += 2
         elif candle == "윗꼬리음봉":       score -= 2
@@ -437,6 +478,9 @@ def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) 
         # 소형주 거래량 추가 점수
         if group_name == "소형" and volume_ratio >= 2.0:
             score += 2
+
+        # 뉴스성 단발 이벤트 감점
+        if event_news:                 score -= 2
 
         if score < 3:
             return None
@@ -464,6 +508,7 @@ def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) 
             "rr_ratio":          rr_ratio,
             "themes":            detected_themes,
             "news":              news_titles,
+            "event_news":        event_news,
             "entry_price":       entry_price,
             "stop_loss":         stop_loss,
             "target_price_1":    target_price_1,
@@ -555,13 +600,14 @@ def format_discord_message(stock: dict, rank: int) -> str:
     ]))
 
     group_emoji = {"소형": "🔹", "중형": "🔷", "대형": "🔶"}.get(stock.get("group", ""), "")
+    event_warn  = "⚡ 단발뉴스주의" if stock.get("event_news") else ""
     verdict     = stock.get("verdict", "")
     reasons     = stock.get("reasons", [])
     risks       = stock.get("risks", [])
 
     msg = (
         f"🚨 수급 감지 #{rank}\n\n"
-        f"🔥 종목: {stock['name']} ({stock['code']})  {group_emoji}{stock.get('group','')}주\n"
+        f"🔥 종목: {stock['name']} ({stock['code']})  {group_emoji}{stock.get('group','')}주  {event_warn}\n"
         f"⭐ 점수: {stock['score']}점  {verdict}\n\n"
         f"{candle_emoji}\n"
         f"{flags}\n\n"
