@@ -82,5 +82,17 @@
     "status": "진행중",
     "result": null,
     "ai_verdict": "분석불가"
+  },
+  {
+    "code": "011780",
+    "name": "금호석유화학",
+    "entry_price": 147800,
+    "stop_loss": 137442,
+    "target_price_1": 163335,
+    "target_price_2": 168514,
+    "entered_at": "2026-05-26 13:52:52",
+    "status": "진행중",
+    "result": null,
+    "ai_verdict": "관망"
   }
 ]

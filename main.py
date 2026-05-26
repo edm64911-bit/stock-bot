@@ -1,16 +1,16 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v2.9
+  초기 수급 탐지 스캐너 v3.0
   변경사항:
-    - Gemini 재시도 로직 제거
-    - 종목당 1회 호출 + 5초 대기
-    - 분당 15회 한도 안전하게 유지
+    - AI 분석 제거
+    - 점수 기반 자동 추천/관망/비추천 판단
+    - 판단 근거 자동 생성
+    - 점수 구간별 등급 표시
 ===================================================
 """
 
 import os
 import sys
-import re
 import time
 import logging
 import traceback
@@ -51,8 +51,7 @@ logging.basicConfig(
 # ==================================================
 # 환경 변수
 # ==================================================
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 # ==================================================
 # 날짜 동적 설정
@@ -210,90 +209,69 @@ def analyze_news(name: str) -> tuple:
         return [], []
 
 # ==================================================
-# JSON 안전 파싱
+# 점수 기반 판단 근거 자동 생성
 # ==================================================
-def safe_parse_response(content: str) -> dict:
-    cleaned = content.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        pass
+def generate_verdict(stock: dict) -> dict:
+    score      = stock["score"]
+    reasons    = []
+    risks      = []
 
-    match = re.search(r'\{[^{}]+\}', content, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except Exception:
-            pass
+    # 추천 근거
+    if stock["volume_ratio"] > 3:
+        reasons.append(f"거래량 {stock['volume_ratio']}배 급증 (강한 수급 유입)")
+    elif stock["volume_ratio"] > 2:
+        reasons.append(f"거래량 {stock['volume_ratio']}배 증가 (수급 유입 신호)")
+    elif stock["volume_ratio"] > 1.5:
+        reasons.append(f"거래량 {stock['volume_ratio']}배 소폭 증가")
 
-    verdict = "관망"
-    if "진입추천" in content or "진입 추천" in content:
-        verdict = "진입추천"
-    elif "진입금지" in content or "진입 금지" in content:
-        verdict = "진입금지"
+    if stock["above_ma20"]:
+        reasons.append("MA20 위에서 유지 (상승 추세)")
+    if stock["near_52w_high"]:
+        reasons.append("52주 신고가 근접 (강한 모멘텀)")
+    if stock["vol_consolidation"]:
+        reasons.append("거래량 급등 후 가격 유지 (눌림 패턴)")
+    if stock["relative_strength"] > 5:
+        reasons.append(f"시장 대비 +{stock['relative_strength']}% 초과 상승 (강한 상대강도)")
+    if stock["foreign_net"] > 0:
+        reasons.append(f"외국인 3일 순매수 {stock['foreign_net']:,}주")
+    if stock["institution_net"] > 0:
+        reasons.append(f"기관 3일 순매수 {stock['institution_net']:,}주")
+    if stock["themes"]:
+        reasons.append(f"{', '.join(stock['themes'])} 테마 (섹터 모멘텀)")
+    if stock["candle"] == "장대양봉":
+        reasons.append("장대양봉 (강한 매수세)")
+    elif stock["candle"] == "아랫꼬리양봉":
+        reasons.append("아랫꼬리양봉 (저점 매수세 유입)")
 
-    lines  = [l.strip() for l in content.split("\n") if l.strip()]
-    reason = lines[1][:100] if len(lines) > 1 else ""
-    risk   = lines[2][:100] if len(lines) > 2 else ""
+    # 리스크
+    if stock["five_day_change"] > 15:
+        risks.append(f"5일 상승률 {stock['five_day_change']}% (단기 급등 부담)")
+    if stock["rsi"] > 65:
+        risks.append(f"RSI {stock['rsi']} (과열 구간 접근)")
+    if not stock["above_ma20"]:
+        risks.append("MA20 하향 돌파 (추세 약화)")
+    if not stock["sector_bullish"]:
+        risks.append("섹터 ETF 약세 (섹터 역행)")
+    if stock["candle"] == "윗꼬리음봉":
+        risks.append("윗꼬리음봉 (매도 압력 존재)")
+    if stock["relative_strength"] < 0:
+        risks.append(f"시장 대비 {stock['relative_strength']}% 하회 (상대강도 약함)")
 
-    return {"verdict": verdict, "reason": reason, "risk": risk}
+    # 판단
+    if score >= 18:
+        verdict = "✅ 강력 추천"
+    elif score >= 13:
+        verdict = "🟡 추천"
+    elif score >= 8:
+        verdict = "⚠️ 관망"
+    else:
+        verdict = "❌ 비추천"
 
-# ==================================================
-# Gemini AI 분석 (재시도 없음 — 1회만 호출)
-# ==================================================
-def analyze_with_gemini(stock: dict) -> dict:
-    if not GEMINI_API_KEY:
-        return {"verdict": "분석불가", "reason": "GEMINI_API_KEY 미설정", "risk": ""}
-
-    prompt = (
-        f"당신은 한국 주식 단기 트레이딩 전문가입니다.\n"
-        f"아래 종목 데이터를 분석하고 JSON으로만 답변하세요.\n\n"
-        f"종목명: {stock['name']} ({stock['code']})\n"
-        f"당일 상승률: {stock['change']}%\n"
-        f"5일 상승률: {stock['five_day_change']}%\n"
-        f"거래량 증가: {stock['volume_ratio']}배\n"
-        f"거래대금: {stock['trading_value']}억\n"
-        f"RSI: {stock['rsi']}\n"
-        f"MA20: {'위' if stock['above_ma20'] else '아래'}\n"
-        f"상대강도: {stock['relative_strength']:+.1f}%\n"
-        f"캔들: {stock['candle']}\n"
-        f"52주 신고가 근접: {'예' if stock['near_52w_high'] else '아니오'}\n"
-        f"눌림 패턴: {'예' if stock['vol_consolidation'] else '아니오'}\n"
-        f"외국인 3일: {stock['foreign_net']:+,}주\n"
-        f"기관 3일: {stock['institution_net']:+,}주\n"
-        f"섹터 강세: {'예' if stock['sector_bullish'] else '아니오'}\n"
-        f"테마: {', '.join(stock['themes']) if stock['themes'] else '없음'}\n"
-        f"진입가: {stock['entry_price']:,}원\n"
-        f"손절가: {stock['stop_loss']:,}원\n"
-        f"1차목표: {stock['target_price_1']:,}원\n"
-        f"2차목표: {stock['target_price_2']:,}원\n"
-        f"RR: 1:{stock['rr_ratio']}\n\n"
-        f"반드시 아래 JSON 형식으로만 응답하세요:\n"
-        f'{{"verdict": "진입추천" 또는 "관망" 또는 "진입금지", "reason": "근거 2줄", "risk": "리스크 1줄"}}'
-    )
-
-    try:
-        url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-        body = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature":     0.1,
-                "maxOutputTokens": 300,
-            }
-        }
-        resp = requests.post(url, json=body, timeout=15)
-
-        if resp.status_code == 429:
-            print(f"  ⚠️ {stock['name']} → Gemini 한도 초과 (관망 처리)")
-            return {"verdict": "관망", "reason": "API 한도 초과로 분석 생략", "risk": ""}
-
-        resp.raise_for_status()
-        content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        return safe_parse_response(content)
-
-    except Exception as e:
-        logging.error(f"Gemini 분석 오류 [{stock['name']}]: {e}")
-        return {"verdict": "관망", "reason": "분석 오류로 관망 처리", "risk": ""}
+    return {
+        "verdict": verdict,
+        "reasons": reasons[:3],   # 상위 3개만
+        "risks":   risks[:2],     # 상위 2개만
+    }
 
 # ==================================================
 # 종목 분석
@@ -454,7 +432,7 @@ def save_positions(top_results: list) -> None:
         for stock in top_results:
             if stock["code"] in existing_codes:
                 continue
-            if stock.get("ai_verdict") == "진입금지":
+            if "비추천" in stock.get("verdict", ""):
                 continue
             positions.append({
                 "code":           stock["code"],
@@ -466,7 +444,7 @@ def save_positions(top_results: list) -> None:
                 "entered_at":     TODAY.strftime("%Y-%m-%d %H:%M:%S"),
                 "status":         "진행중",
                 "result":         None,
-                "ai_verdict":     stock.get("ai_verdict", ""),
+                "verdict":        stock.get("verdict", ""),
             })
 
         with open(filename, "w", encoding="utf-8") as f:
@@ -494,21 +472,14 @@ def format_discord_message(stock: dict, rank: int) -> str:
         "⚠️ 섹터역행"                                 if not stock["sector_bullish"]     else "",
     ]))
 
-    verdict       = stock.get("ai_verdict", "")
-    verdict_emoji = {
-        "진입추천": "✅",
-        "관망":     "⚠️",
-        "진입금지": "❌",
-        "분석불가": "❓",
-    }.get(verdict, "❓")
-
-    ai_reason = stock.get("ai_reason", "")
-    ai_risk   = stock.get("ai_risk", "")
+    verdict  = stock.get("verdict", "")
+    reasons  = stock.get("reasons", [])
+    risks    = stock.get("risks", [])
 
     msg = (
         f"🚨 수급 감지 #{rank}\n\n"
-        f"🔥 종목: {stock['name']} ({stock['code']})\n\n"
-        f"⭐ 점수: {stock['score']}점\n"
+        f"🔥 종목: {stock['name']} ({stock['code']})\n"
+        f"⭐ 점수: {stock['score']}점  {verdict}\n\n"
         f"{candle_emoji}\n"
         f"{flags}\n\n"
         f"📈 당일 상승률:  {stock['change']}%\n"
@@ -518,21 +489,26 @@ def format_discord_message(stock: dict, rank: int) -> str:
         f"📉 RSI:          {stock['rsi']}\n"
         f"🌐 상대강도:     {stock['relative_strength']:+.1f}%\n"
         f"👥 외국인 3일:   {stock['foreign_net']:+,}주\n"
-        f"🏦 기관 3일:     +0주\n\n"
+        f"🏦 기관 3일:     {stock['institution_net']:+,}주\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 진입가:    {stock['entry_price']:,}원\n"
         f"🚀 1차 목표:  {stock['target_price_1']:,}원  → 절반 청산 후 손절 본전으로\n"
         f"🚀 2차 목표:  {stock['target_price_2']:,}원  → 나머지 전량 청산\n"
         f"🛑 손절가:    {stock['stop_loss']:,}원  (절대 불변)\n"
         f"📐 RR:        1 : {stock['rr_ratio']}\n"
-        f"━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🤖 AI 분석: {verdict_emoji} {verdict}\n"
-        f"근거: {ai_reason}\n"
-        f"리스크: {ai_risk}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
     )
 
+    if reasons:
+        msg += "\n📋 추천 근거\n"
+        msg += "\n".join(f"  ✔ {r}" for r in reasons)
+
+    if risks:
+        msg += "\n\n⚠️ 리스크\n"
+        msg += "\n".join(f"  • {r}" for r in risks)
+
     if stock["themes"]:
-        msg += "\n🏷️ 테마\n" + "\n".join(f"  - {t}" for t in stock["themes"])
+        msg += "\n\n🏷️ 테마\n" + "\n".join(f"  - {t}" for t in stock["themes"])
     if stock["news"]:
         msg += "\n\n📰 뉴스\n" + "\n".join(f"  • {n}" for n in stock["news"])
 
@@ -553,7 +529,7 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v2.9")
+    print(f"🚀 초기 수급 탐지 스캐너 v3.0")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
@@ -604,15 +580,12 @@ def main() -> None:
         send_discord_message(msg)
         return
 
-    # ⑤ Gemini AI 분석 (1회만 호출 + 5초 대기)
-    print("\n🤖 Gemini AI 분석 중...")
+    # ⑤ 판단 근거 생성
     for stock in top_results:
-        ai_result = analyze_with_gemini(stock)
-        stock["ai_verdict"] = ai_result.get("verdict", "관망")
-        stock["ai_reason"]  = ai_result.get("reason", "")
-        stock["ai_risk"]    = ai_result.get("risk", "")
-        print(f"  {stock['name']} → {stock['ai_verdict']}")
-        time.sleep(5)  # 분당 15회 한도 안전하게 유지 (5초 간격 = 분당 12회)
+        verdict_info      = generate_verdict(stock)
+        stock["verdict"]  = verdict_info["verdict"]
+        stock["reasons"]  = verdict_info["reasons"]
+        stock["risks"]    = verdict_info["risks"]
 
     # ⑥ JSON 저장
     save_results(results)

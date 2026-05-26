@@ -21,3 +21,4 @@
 2026-05-26 13:39:11,470 [ERROR] Gemini 분석 오류 [루닛]: 400 Client Error: Bad Request for url: https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyDu9HSLreQFWc0amJY0HRELmvXsStJ5Jt
 2026-05-26 13:39:17,513 [ERROR] Gemini 분석 오류 [루닛]: 400 Client Error: Bad Request for url: https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyDu9HSLreQFWc0amJY0HRELmvXsStJ5Jt
 2026-05-26 13:39:22,517 [ERROR] 결과 저장 실패: Object of type bool is not JSON serializable
+2026-05-26 13:54:47,797 [ERROR] 결과 저장 실패: Object of type bool is not JSON serializable
