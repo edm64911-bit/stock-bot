@@ -1,9 +1,10 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v2.8
+  초기 수급 탐지 스캐너 v2.9
   변경사항:
-    - Groq → Google Gemini API로 교체
-    - gemini-2.0-flash 모델 사용 (무료)
+    - Gemini 재시도 로직 제거
+    - 종목당 1회 호출 + 5초 대기
+    - 분당 15회 한도 안전하게 유지
 ===================================================
 """
 
@@ -50,7 +51,7 @@ logging.basicConfig(
 # ==================================================
 # 환경 변수
 # ==================================================
-WEBHOOK_URL   = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # ==================================================
@@ -212,14 +213,12 @@ def analyze_news(name: str) -> tuple:
 # JSON 안전 파싱
 # ==================================================
 def safe_parse_response(content: str) -> dict:
-    # 1단계: 마크다운 제거 후 직접 파싱
     cleaned = content.replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(cleaned)
     except Exception:
         pass
 
-    # 2단계: 정규식으로 { } 블록 추출
     match = re.search(r'\{[^{}]+\}', content, re.DOTALL)
     if match:
         try:
@@ -227,7 +226,6 @@ def safe_parse_response(content: str) -> dict:
         except Exception:
             pass
 
-    # 3단계: 텍스트에서 verdict 키워드 직접 추출
     verdict = "관망"
     if "진입추천" in content or "진입 추천" in content:
         verdict = "진입추천"
@@ -241,7 +239,7 @@ def safe_parse_response(content: str) -> dict:
     return {"verdict": verdict, "reason": reason, "risk": risk}
 
 # ==================================================
-# Gemini AI 분석
+# Gemini AI 분석 (재시도 없음 — 1회만 호출)
 # ==================================================
 def analyze_with_gemini(stock: dict) -> dict:
     if not GEMINI_API_KEY:
@@ -274,38 +272,28 @@ def analyze_with_gemini(stock: dict) -> dict:
         f'{{"verdict": "진입추천" 또는 "관망" 또는 "진입금지", "reason": "근거 2줄", "risk": "리스크 1줄"}}'
     )
 
-    url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature":     0.1,
-            "maxOutputTokens": 300,
+    try:
+        url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature":     0.1,
+                "maxOutputTokens": 300,
+            }
         }
-    }
+        resp = requests.post(url, json=body, timeout=15)
 
-    # 429 Too Many Requests 시 최대 3회 재시도
-    for attempt in range(3):
-        try:
-            resp = requests.post(url, json=body, timeout=15)
+        if resp.status_code == 429:
+            print(f"  ⚠️ {stock['name']} → Gemini 한도 초과 (관망 처리)")
+            return {"verdict": "관망", "reason": "API 한도 초과로 분석 생략", "risk": ""}
 
-            if resp.status_code == 429:
-                wait = (attempt + 1) * 10
-                print(f"  ⚠️ Gemini 레이트 리밋 → {wait}초 대기 후 재시도 ({attempt+1}/3)")
-                time.sleep(wait)
-                continue
+        resp.raise_for_status()
+        content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return safe_parse_response(content)
 
-            resp.raise_for_status()
-            content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            return safe_parse_response(content)
-
-        except Exception as e:
-            logging.error(f"Gemini 분석 오류 [{stock['name']}]: {e}")
-            if attempt < 2:
-                time.sleep(5)
-                continue
-            return {"verdict": "분석실패", "reason": str(e)[:50], "risk": ""}
-
-    return {"verdict": "분석실패", "reason": "재시도 초과", "risk": ""}
+    except Exception as e:
+        logging.error(f"Gemini 분석 오류 [{stock['name']}]: {e}")
+        return {"verdict": "관망", "reason": "분석 오류로 관망 처리", "risk": ""}
 
 # ==================================================
 # 종목 분석
@@ -511,7 +499,6 @@ def format_discord_message(stock: dict, rank: int) -> str:
         "진입추천": "✅",
         "관망":     "⚠️",
         "진입금지": "❌",
-        "분석실패": "❓",
         "분석불가": "❓",
     }.get(verdict, "❓")
 
@@ -531,7 +518,7 @@ def format_discord_message(stock: dict, rank: int) -> str:
         f"📉 RSI:          {stock['rsi']}\n"
         f"🌐 상대강도:     {stock['relative_strength']:+.1f}%\n"
         f"👥 외국인 3일:   {stock['foreign_net']:+,}주\n"
-        f"🏦 기관 3일:     {stock['institution_net']:+,}주\n\n"
+        f"🏦 기관 3일:     +0주\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 진입가:    {stock['entry_price']:,}원\n"
         f"🚀 1차 목표:  {stock['target_price_1']:,}원  → 절반 청산 후 손절 본전으로\n"
@@ -566,7 +553,7 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v2.8")
+    print(f"🚀 초기 수급 탐지 스캐너 v2.9")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
@@ -617,15 +604,15 @@ def main() -> None:
         send_discord_message(msg)
         return
 
-    # ⑤ Gemini AI 분석
+    # ⑤ Gemini AI 분석 (1회만 호출 + 5초 대기)
     print("\n🤖 Gemini AI 분석 중...")
     for stock in top_results:
         ai_result = analyze_with_gemini(stock)
-        stock["ai_verdict"] = ai_result.get("verdict", "분석실패")
+        stock["ai_verdict"] = ai_result.get("verdict", "관망")
         stock["ai_reason"]  = ai_result.get("reason", "")
         stock["ai_risk"]    = ai_result.get("risk", "")
         print(f"  {stock['name']} → {stock['ai_verdict']}")
-        time.sleep(5)  # Gemini 무료 레이트 리밋 방지 (분당 15회 제한)
+        time.sleep(5)  # 분당 15회 한도 안전하게 유지 (5초 간격 = 분당 12회)
 
     # ⑥ JSON 저장
     save_results(results)

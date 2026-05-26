@@ -1,0 +1,86 @@
+[
+  {
+    "code": "420770",
+    "name": "기가비스",
+    "entry_price": 141800,
+    "stop_loss": 129042,
+    "target_price_1": 160935,
+    "target_price_2": 167314,
+    "entered_at": "2026-05-26 13:33:29",
+    "status": "진행중",
+    "result": null,
+    "ai_verdict": "분석불가"
+  },
+  {
+    "code": "490470",
+    "name": "세미파이브",
+    "entry_price": 40750,
+    "stop_loss": 36839,
+    "target_price_1": 46616,
+    "target_price_2": 48571,
+    "entered_at": "2026-05-26 13:33:29",
+    "status": "진행중",
+    "result": null,
+    "ai_verdict": "분석불가"
+  },
+  {
+    "code": "005290",
+    "name": "동진쎄미켐",
+    "entry_price": 66800,
+    "stop_loss": 61732,
+    "target_price_1": 74401,
+    "target_price_2": 76935,
+    "entered_at": "2026-05-26 13:33:29",
+    "status": "진행중",
+    "result": null,
+    "ai_verdict": "분석불가"
+  },
+  {
+    "code": "347700",
+    "name": "스피어",
+    "entry_price": 46900,
+    "stop_loss": 42064,
+    "target_price_1": 54153,
+    "target_price_2": 56571,
+    "entered_at": "2026-05-26 13:33:29",
+    "status": "진행중",
+    "result": null,
+    "ai_verdict": "분석불가"
+  },
+  {
+    "code": "437730",
+    "name": "삼현",
+    "entry_price": 59200,
+    "stop_loss": 54221,
+    "target_price_1": 66667,
+    "target_price_2": 69157,
+    "entered_at": "2026-05-26 13:33:29",
+    "status": "진행중",
+    "result": null,
+    "ai_verdict": "분석불가"
+  },
+  {
+    "code": "005070",
+    "name": "코스모신소재",
+    "entry_price": 57000,
+    "stop_loss": 53103,
+    "target_price_1": 62844,
+    "target_price_2": 64792,
+    "entered_at": "2026-05-26 13:33:29",
+    "status": "진행중",
+    "result": null,
+    "ai_verdict": "분석불가"
+  },
+  {
+    "code": "328130",
+    "name": "루닛",
+    "entry_price": 18120,
+    "stop_loss": 16520,
+    "target_price_1": 20520,
+    "target_price_2": 21320,
+    "entered_at": "2026-05-26 13:33:29",
+    "status": "진행중",
+    "result": null,
+    "ai_verdict": "분석불가"
+  }
+]
