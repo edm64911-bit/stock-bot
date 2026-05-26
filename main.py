@@ -599,16 +599,23 @@ def format_discord_message(stock: dict, rank: int) -> str:
         sector_str,
     ]))
 
-    group_emoji = {"소형": "🔹", "중형": "🔷", "대형": "🔶"}.get(stock.get("group", ""), "")
-    event_warn  = "⚡ 단발뉴스주의" if stock.get("event_news") else ""
-    verdict     = stock.get("verdict", "")
-    reasons     = stock.get("reasons", [])
-    risks       = stock.get("risks", [])
+    group_emoji   = {"소형": "🔹", "중형": "🔷", "대형": "🔶"}.get(stock.get("group", ""), "")
+    event_warn    = "⚡ 단발뉴스주의" if stock.get("event_news") else ""
+    overheat_warn = ""
+    if stock["rsi"] >= 70 and stock["change"] >= 15:
+        overheat_warn = f"🔥 과열주의 (RSI {stock['rsi']} + 당일 {stock['change']}%)"
+
+    verdict = stock.get("verdict", "")
+    reasons = stock.get("reasons", [])
+    risks   = stock.get("risks", [])
+
+    warn_line = "  ".join(filter(None, [event_warn, overheat_warn]))
 
     msg = (
         f"🚨 수급 감지 #{rank}\n\n"
-        f"🔥 종목: {stock['name']} ({stock['code']})  {group_emoji}{stock.get('group','')}주  {event_warn}\n"
-        f"⭐ 점수: {stock['score']}점  {verdict}\n\n"
+        f"🔥 종목: {stock['name']} ({stock['code']})  {group_emoji}{stock.get('group','')}주"
+        + (f"  {warn_line}" if warn_line else "") +
+        f"\n⭐ 점수: {stock['score']}점  {verdict}\n\n"
         f"{candle_emoji}\n"
         f"{flags}\n\n"
         f"📈 당일 상승률:  {stock['change']}%\n"
