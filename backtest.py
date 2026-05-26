@@ -18,7 +18,7 @@ import FinanceDataReader as fdr
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_STOCK_WEEKLY = os.getenv("WEBHOOK_STOCK_WEEKLY", "")
 
 logging.basicConfig(
     filename=f"backtest_{datetime.now().strftime('%Y%m%d')}.log",
@@ -31,13 +31,13 @@ logging.basicConfig(
 # Discord 전송
 # ==================================================
 def send_discord_message(message: str) -> None:
-    if not WEBHOOK_URL:
+    if not WEBHOOK_STOCK_WEEKLY:
         print(message)
         return
     chunks = [message[i:i+1900] for i in range(0, len(message), 1900)]
     for chunk in chunks:
         try:
-            requests.post(WEBHOOK_URL, json={"content": chunk}, timeout=10)
+            requests.post(WEBHOOK_STOCK_WEEKLY, json={"content": chunk}, timeout=10)
         except Exception as e:
             logging.error(f"Discord 오류: {e}")
 

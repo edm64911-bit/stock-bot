@@ -55,7 +55,10 @@ logging.basicConfig(
 # ==================================================
 # 환경 변수
 # ==================================================
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_STOCK        = os.getenv("WEBHOOK_STOCK", "")
+WEBHOOK_STOCK_WEEKLY = os.getenv("WEBHOOK_STOCK_WEEKLY", "")
+WEBHOOK_COIN         = os.getenv("WEBHOOK_COIN", "")
+WEBHOOK_COIN_WEEKLY  = os.getenv("WEBHOOK_COIN_WEEKLY", "")
 
 # ==================================================
 # 날짜 동적 설정
@@ -118,20 +121,21 @@ results_lock = Lock()
 def clean_text(text: str) -> str:
     return str(text).replace(" ", "").lower()
 
-def send_discord_message(message: str) -> None:
-    if not WEBHOOK_URL:
-        print("[Discord] WEBHOOK_URL 미설정\n", message)
+def send_discord_message(message: str, webhook: str = "") -> None:
+    url = webhook or WEBHOOK_STOCK
+    if not url:
+        print("[Discord] 웹훅 미설정\n", message)
         return
     chunks = [message[i:i+1900] for i in range(0, len(message), 1900)]
     for chunk in chunks:
         try:
-            resp = requests.post(WEBHOOK_URL, json={"content": chunk}, timeout=10)
+            resp = requests.post(url, json={"content": chunk}, timeout=10)
             resp.raise_for_status()
         except Exception as e:
             logging.error(f"Discord 오류: {e}")
 
 def send_discord_error(msg: str) -> None:
-    send_discord_message(f"⚠️ [스캐너 오류] {msg}")
+    send_discord_message(f"⚠️ [스캐너 오류] {msg}", WEBHOOK_STOCK)
 
 def calculate_rsi(close: pd.Series, period: int = 14) -> float:
     delta    = close.diff()
@@ -734,7 +738,7 @@ def main() -> None:
     if not top_results:
         msg = f"❌ 수급 감지 종목 없음 (스캔완료 {elapsed}초)"
         print(msg)
-        send_discord_message(msg)
+        send_discord_message(msg, WEBHOOK_STOCK)
         return
 
     # ⑦ 판단 근거 생성
@@ -755,7 +759,7 @@ def main() -> None:
         message = format_discord_message(stock, rank)
         print(message)
         print("-" * 40)
-        send_discord_message(message)
+        send_discord_message(message, WEBHOOK_STOCK)
         time.sleep(0.3)
 
     print(f"\n✅ 완료 | 소요: {elapsed}초")

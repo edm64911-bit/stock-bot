@@ -17,7 +17,7 @@ import FinanceDataReader as fdr
 
 from datetime import datetime, timedelta
 
-WEBHOOK_URL  = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_STOCK = os.getenv("WEBHOOK_STOCK", "")
 POSITION_FILE = "positions.json"
 
 LOG_FILE = f"tracker_{datetime.now().strftime('%Y%m%d')}.log"
@@ -29,11 +29,11 @@ logging.basicConfig(
 )
 
 def send_discord_message(message: str) -> None:
-    if not WEBHOOK_URL:
+    if not WEBHOOK_STOCK:
         print(message)
         return
     try:
-        requests.post(WEBHOOK_URL, json={"content": message}, timeout=10)
+        requests.post(WEBHOOK_STOCK, json={"content": message}, timeout=10)
     except Exception as e:
         logging.error(f"Discord 오류: {e}")
 
