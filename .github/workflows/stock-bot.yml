@@ -10,14 +10,14 @@ on:
     - cron: '30 2 * * 1-5'    # KST 11:30 추적
     - cron: '30 4 * * 1-5'    # KST 13:30 추적
     - cron: '30 6 * * 1-5'    # KST 15:30 추적
-    - cron: '0 22 * * 0'      # KST 일요일 07:00 백테스트 (주간 리포트)
+    - cron: '0 22 * * 0'      # KST 일요일 07:00 백테스트
   workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  scan:
+  run-bot:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -33,11 +33,12 @@ jobs:
 
       - name: 라이브러리 설치
         run: |
-          pip install finance-datareader feedparser requests pandas scikit-learn
+          pip install finance-datareader feedparser requests pandas
 
       - name: 스캐너 실행
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python main.py
 
       - name: 추적 실행
