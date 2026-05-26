@@ -2,35 +2,93 @@ import FinanceDataReader as fdr
 import yfinance as yf
 import feedparser
 import requests
-import time
+import pandas as pd
+import numpy as np
 import math
+import time
 
 from concurrent.futures import (
     ThreadPoolExecutor,
     as_completed
 )
 
-# ====================================
+# ==================================================
 # 디스코드 웹훅
-# ====================================
+# ==================================================
 WEBHOOK_URL = "https://discord.com/api/webhooks/1507283857643143168/lcTH5vRk94YHIxb0zCf9Q7RJmqb2gse3sPcVsUp9FbnMPrm_pTgs16FnfWFmJY5QLCrf"
 
-# ====================================
+# ==================================================
 # 테마 키워드
-# ====================================
+# ==================================================
 themes = {
-    "AI": ["AI", "인공지능"],
-    "반도체": ["반도체", "HBM", "엔비디아"],
-    "로봇": ["로봇"],
-    "2차전지": ["배터리", "전기차"],
-    "방산": ["방산", "국방"],
-    "바이오": ["바이오", "제약"],
-    "전력": ["전력", "원전"],
+
+    "AI": [
+        "AI",
+        "인공지능",
+        "챗GPT",
+        "LLM"
+    ],
+
+    "반도체": [
+        "반도체",
+        "HBM",
+        "엔비디아"
+    ],
+
+    "로봇": [
+        "로봇",
+        "자동화"
+    ],
+
+    "2차전지": [
+        "배터리",
+        "전기차"
+    ],
+
+    "방산": [
+        "방산",
+        "국방"
+    ],
+
+    "바이오": [
+        "바이오",
+        "제약",
+        "FDA"
+    ],
+
+    "전력": [
+        "전력",
+        "원전"
+    ]
 }
 
-# ====================================
+# ==================================================
+# 뉴스 점수 키워드
+# ==================================================
+positive_keywords = {
+
+    "계약": 3,
+    "수주": 3,
+    "협약": 2,
+    "투자": 2,
+    "실적": 2,
+    "정부": 2,
+    "FDA": 3,
+    "공급": 2,
+    "양산": 2,
+}
+
+negative_keywords = {
+
+    "유상증자": -5,
+    "전환사채": -4,
+    "적자": -3,
+    "감자": -5,
+}
+
+# ==================================================
 # 문자열 정리
-# ====================================
+# ==================================================
 def clean_text(text):
 
     return str(text).replace(
@@ -38,9 +96,27 @@ def clean_text(text):
         ""
     ).lower()
 
-# ====================================
-# 시장 코드
-# ====================================
+# ==================================================
+# 디스코드 메시지
+# ==================================================
+def send_discord_message(message):
+
+    try:
+
+        requests.post(
+            WEBHOOK_URL,
+            json={
+                "content": message
+            },
+            timeout=10
+        )
+
+    except:
+        pass
+
+# ==================================================
+# 시장 구분
+# ==================================================
 def get_market_suffix(market):
 
     if "KOSDAQ" in market:
@@ -48,33 +124,15 @@ def get_market_suffix(market):
 
     return ".KS"
 
-# ====================================
-# 디스코드 메시지 전송
-# ====================================
-def send_discord_message(message):
-
-    data = {
-        "content": message
-    }
-
-    requests.post(
-        WEBHOOK_URL,
-        json=data
-    )
-
-# ====================================
+# ==================================================
 # RSI 계산
-# ====================================
-def calculate_rsi(close_prices):
+# ==================================================
+def calculate_rsi(close):
 
-    delta = close_prices.diff()
+    delta = close.diff()
 
     up = delta.clip(lower=0)
-
-    down = (
-        -1
-        * delta.clip(upper=0)
-    )
+    down = -1 * delta.clip(upper=0)
 
     ema_up = up.ewm(
         com=13,
@@ -95,9 +153,9 @@ def calculate_rsi(close_prices):
 
     return rsi.iloc[-1]
 
-# ====================================
+# ==================================================
 # ATR 계산
-# ====================================
+# ==================================================
 def calculate_atr(data):
 
     data['Prev_Close'] = (
@@ -125,16 +183,137 @@ def calculate_atr(data):
 
     data['ATR'] = (
         data['TR']
-        .rolling(window=14)
+        .rolling(14)
         .mean()
     )
 
     return data['ATR'].iloc[-1]
 
-# ====================================
+# ==================================================
+# 시장 상태 분석
+# ==================================================
+def market_condition():
+
+    try:
+
+        kosdaq = yf.Ticker("^KQ11")
+
+        data = kosdaq.history(
+            period="5d"
+        )
+
+        if len(data) < 3:
+            return "NEUTRAL"
+
+        recent_change = (
+            (
+                data['Close'].iloc[-1]
+                - data['Close'].iloc[-3]
+            )
+            / data['Close'].iloc[-3]
+        ) * 100
+
+        if recent_change > 2:
+            return "BULL"
+
+        elif recent_change < -2:
+            return "BEAR"
+
+        return "NEUTRAL"
+
+    except:
+        return "NEUTRAL"
+
+# ==================================================
+# 뉴스 분석
+# ==================================================
+def analyze_news(name):
+
+    try:
+
+        news_url = (
+            f"https://news.google.com/rss/search?"
+            f"q={name}+주식&hl=ko&gl=KR&ceid=KR:ko"
+        )
+
+        news = feedparser.parse(
+            news_url
+        )
+
+        news_titles = []
+
+        detected_themes = set()
+
+        news_score = 0
+
+        for item in news.entries[:5]:
+
+            title = item.title
+
+            if title in news_titles:
+                continue
+
+            news_titles.append(title)
+
+            cleaned = clean_text(title)
+
+            # 테마 분석
+            for (
+                theme,
+                keywords
+            ) in themes.items():
+
+                for keyword in keywords:
+
+                    if (
+                        clean_text(keyword)
+                        in cleaned
+                    ):
+
+                        detected_themes.add(
+                            theme
+                        )
+
+            # 긍정 점수
+            for (
+                keyword,
+                score
+            ) in positive_keywords.items():
+
+                if (
+                    clean_text(keyword)
+                    in cleaned
+                ):
+
+                    news_score += score
+
+            # 부정 점수
+            for (
+                keyword,
+                score
+            ) in negative_keywords.items():
+
+                if (
+                    clean_text(keyword)
+                    in cleaned
+                ):
+
+                    news_score += score
+
+        return (
+            news_titles[:3],
+            list(detected_themes),
+            news_score
+        )
+
+    except:
+
+        return [], [], 0
+
+# ==================================================
 # 종목 분석
-# ====================================
-def analyze_stock(row):
+# ==================================================
+def analyze_stock(row, market_status):
 
     try:
 
@@ -143,7 +322,8 @@ def analyze_stock(row):
         market = row['Market']
 
         ticker_code = (
-            code + get_market_suffix(market)
+            code
+            + get_market_suffix(market)
         )
 
         ticker = yf.Ticker(
@@ -156,20 +336,64 @@ def analyze_stock(row):
 
         data = data.dropna()
 
-        if len(data) < 40:
+        if len(data) < 60:
             return None
 
-        # ====================================
+        # ==================================================
+        # 가격
+        # ==================================================
+        today_close = (
+            data['Close']
+            .iloc[-1]
+        )
+
+        yesterday_close = (
+            data['Close']
+            .iloc[-2]
+        )
+
+        if (
+            today_close <= 0
+            or yesterday_close <= 0
+        ):
+            return None
+
+        # ==================================================
+        # 상승률
+        # ==================================================
+        change_percent = (
+            (
+                today_close
+                - yesterday_close
+            )
+            / yesterday_close
+        ) * 100
+
+        change_percent = round(
+            change_percent,
+            2
+        )
+
+        # ==================================================
+        # 위험 제거
+        # ==================================================
+        if change_percent > 7:
+            return None
+
+        if today_close < 2000:
+            return None
+
+        # ==================================================
         # 거래량
-        # ====================================
+        # ==================================================
         avg_volume = (
-            data["Volume"]
+            data['Volume']
             .iloc[-11:-1]
             .mean()
         )
 
         today_volume = (
-            data["Volume"]
+            data['Volume']
             .iloc[-1]
         )
 
@@ -181,71 +405,67 @@ def analyze_stock(row):
             / avg_volume
         )
 
-        # ====================================
-        # 가격
-        # ====================================
-        yesterday_close = (
-            data["Close"]
-            .iloc[-2]
-        )
-
-        today_close = (
-            data["Close"]
-            .iloc[-1]
-        )
-
-        if (
-            yesterday_close <= 0
-            or today_close <= 0
-        ):
-            return None
-
-        # ====================================
-        # 등락률
-        # ====================================
-        change_percent = (
-            (
-                today_close
-                - yesterday_close
-            )
-            / yesterday_close
-        ) * 100
-
-        if (
-            math.isnan(change_percent)
-            or math.isinf(change_percent)
-        ):
-            return None
-
-        change_percent = round(
-            change_percent,
-            2
-        )
-
-        # ====================================
+        # ==================================================
         # 거래대금
-        # ====================================
+        # ==================================================
         trading_value = (
             today_close
             * today_volume
         )
 
-        # 거래대금 200억 이상
-        if trading_value < 20000000000:
+        if trading_value < 30000000000:
             return None
 
-        # ====================================
+        # ==================================================
+        # 거래대금 지속성
+        # ==================================================
+        recent_value = (
+            (
+                data['Close']
+                * data['Volume']
+            )
+            .tail(3)
+            .mean()
+        )
+
+        old_value = (
+            (
+                data['Close']
+                * data['Volume']
+            )
+            .iloc[-20:-3]
+            .mean()
+        )
+
+        if recent_value < old_value * 1.3:
+            return None
+
+        # ==================================================
         # 이동평균선
-        # ====================================
+        # ==================================================
+        ma5 = (
+            data['Close']
+            .tail(5)
+            .mean()
+        )
+
         ma20 = (
-            data["Close"]
+            data['Close']
             .tail(20)
             .mean()
         )
 
-        # ====================================
+        # 정배열
+        if ma5 < ma20:
+            return None
+
+        # 눌림 유지
+        if today_close < ma5:
+            return None
+
+        # ==================================================
         # RSI
-        # ====================================
+        # ==================================================
         today_rsi = calculate_rsi(
             data['Close']
         )
@@ -256,9 +476,9 @@ def analyze_stock(row):
         ):
             return None
 
-        # ====================================
+        # ==================================================
         # ATR
-        # ====================================
+        # ==================================================
         today_atr = calculate_atr(
             data
         )
@@ -269,199 +489,206 @@ def analyze_stock(row):
         ):
             return None
 
-        # ====================================
-        # 초기 수급 탐지
-        # ====================================
-        if (
+        # ==================================================
+        # 초기 수급 조건
+        # ==================================================
+        if not (
 
-            # 거래량 급증
             volume_ratio > 2
 
-            # 아직 덜 오른 상태
             and change_percent > -1
             and change_percent < 3
 
-            # RSI 과열 아님
             and today_rsi < 60
 
-            # 추세 유지
             and today_close > ma20
 
         ):
 
-            # ====================================
-            # 뉴스
-            # ====================================
-            news_url = (
-                f"https://news.google.com/rss/search?"
-                f"q={name}+주식&hl=ko&gl=KR&ceid=KR:ko"
+            return None
+
+        # ==================================================
+        # 뉴스 분석
+        # ==================================================
+        (
+            news_titles,
+            detected_themes,
+            news_score
+        ) = analyze_news(name)
+
+        # ==================================================
+        # 진입 / 목표 / 손절
+        # ==================================================
+        entry_price = int(
+            today_close
+        )
+
+        target_price = int(
+            today_close
+            + (today_atr * 2)
+        )
+
+        stop_loss = int(
+            today_close
+            - (today_atr * 1.2)
+        )
+
+        # ==================================================
+        # 추천 이유
+        # ==================================================
+        reasons = []
+
+        if volume_ratio > 3:
+            reasons.append(
+                "거래량 급증"
             )
 
-            news = feedparser.parse(
-                news_url
+        if today_rsi < 55:
+            reasons.append(
+                "초기 수급"
             )
 
-            news_titles = []
-
-            detected_themes = set()
-
-            for item in news.entries[:5]:
-
-                title = item.title
-
-                if title in news_titles:
-                    continue
-
-                news_titles.append(title)
-
-                cleaned = clean_text(
-                    title
-                )
-
-                # ====================================
-                # 테마 분석
-                # ====================================
-                for (
-                    theme,
-                    keywords
-                ) in themes.items():
-
-                    for keyword in keywords:
-
-                        if (
-                            clean_text(keyword)
-                            in cleaned
-                        ):
-
-                            detected_themes.add(
-                                theme
-                            )
-
-            # ====================================
-            # 진입/목표/손절
-            # ====================================
-            entry_price = int(
-                today_close
+        if len(detected_themes) >= 1:
+            reasons.append(
+                "테마 자금 유입"
             )
 
-            target_price = int(
-                today_close
-                + (today_atr * 2)
+        if news_score >= 3:
+            reasons.append(
+                "강한 뉴스 재료"
             )
 
-            stop_loss = int(
-                today_close
-                - (today_atr * 1.2)
-            )
+        # ==================================================
+        # 점수 계산
+        # ==================================================
+        score = 0
 
-            # ====================================
-            # 추천 이유 생성
-            # ====================================
-            reasons = []
+        # 거래량
+        score += min(
+            int(volume_ratio),
+            5
+        )
 
-            if volume_ratio > 3:
-                reasons.append(
-                    "거래량 폭발"
-                )
+        # 거래대금
+        if trading_value > 100000000000:
+            score += 5
 
-            if today_rsi < 55:
-                reasons.append(
-                    "초기 수급"
-                )
+        elif trading_value > 50000000000:
+            score += 3
 
-            if len(detected_themes) >= 1:
-                reasons.append(
-                    "테마 자금 유입"
-                )
+        # RSI
+        if 45 <= today_rsi <= 60:
+            score += 3
 
-            # ====================================
-            # 추천 점수
-            # ====================================
-            score = 0
+        # 상승률
+        if 0 < change_percent < 3:
+            score += 4
 
-            # 거래량
-            if volume_ratio > 3:
-                score += 4
-            elif volume_ratio > 2:
-                score += 3
+        # 뉴스
+        score += news_score
 
-            # 초입 점수
-            if (
-                change_percent > 0
-                and change_percent < 2
-            ):
-                score += 3
+        # 테마
+        score += (
+            len(detected_themes)
+            * 2
+        )
 
-            # RSI
-            if today_rsi < 55:
-                score += 2
+        # ==================================================
+        # 시장 상태 반영
+        # ==================================================
+        if market_status == "BULL":
+            score += 2
 
-            # 거래대금
-            if trading_value > 50000000000:
-                score += 3
+        elif market_status == "BEAR":
+            score -= 2
 
-            # 테마
-            if len(detected_themes) >= 1:
-                score += 2
+        # ==================================================
+        # 등급
+        # ==================================================
+        if score >= 15:
+            grade = "S"
 
-            return {
+        elif score >= 11:
+            grade = "A"
 
-                "name": name,
+        elif score >= 8:
+            grade = "B"
 
-                "score": score,
+        else:
+            grade = "C"
 
-                "change": change_percent,
+        return {
 
-                "volume_ratio": round(
-                    volume_ratio,
-                    1
-                ),
+            "name": name,
 
-                "themes": list(
-                    detected_themes
-                ),
+            "score": score,
 
-                "news": news_titles[:3],
+            "grade": grade,
 
-                "trading_value": int(
-                    trading_value
-                    / 100000000
-                ),
+            "change": change_percent,
 
-                "entry_price": entry_price,
+            "volume_ratio": round(
+                volume_ratio,
+                1
+            ),
 
-                "target_price": target_price,
+            "trading_value": int(
+                trading_value
+                / 100000000
+            ),
 
-                "stop_loss": stop_loss,
+            "rsi": round(
+                today_rsi,
+                1
+            ),
 
-                "rsi": round(
-                    today_rsi,
-                    1
-                ),
+            "themes": detected_themes,
 
-                "reasons": reasons
-            }
+            "news": news_titles,
+
+            "entry_price": entry_price,
+
+            "target_price": target_price,
+
+            "stop_loss": stop_loss,
+
+            "reasons": reasons
+        }
 
     except Exception as e:
 
-        print(name, e)
+        print(e)
 
         return None
 
-# ====================================
+# ==================================================
 # 메인 실행
-# ====================================
+# ==================================================
 def main():
 
     print("🚀 초기 수급 탐지 시작")
 
-    stocks = (
-        fdr.StockListing('KRX')
-        .head(150)
-    )
+    market_status = market_condition()
+
+    print(f"시장 상태: {market_status}")
+
+    # ==================================================
+    # 종목 리스트
+    # ==================================================
+    stocks = fdr.StockListing('KRX')
+
+    stocks = stocks[
+        stocks['Market'].isin([
+            'KOSPI',
+            'KOSDAQ'
+        ])
+    ]
 
     results = []
 
+    # ==================================================
+    # 멀티스레드 분석
+    # ==================================================
     with ThreadPoolExecutor(
         max_workers=10
     ) as executor:
@@ -470,7 +697,8 @@ def main():
 
             executor.submit(
                 analyze_stock,
-                row
+                row,
+                market_status
             )
 
             for _, row
@@ -486,104 +714,65 @@ def main():
             if result:
                 results.append(result)
 
-    # ====================================
-    # 점수순 정렬
-    # ====================================
+    # ==================================================
+    # 점수 정렬
+    # ==================================================
     results = sorted(
         results,
         key=lambda x: x['score'],
         reverse=True
     )
 
-    # 상위 5개
     top_results = results[:5]
 
-    # ====================================
-    # 결과 없을 때
-    # ====================================
+    # ==================================================
+    # 결과 없음
+    # ==================================================
     if not top_results:
 
         send_discord_message(
-            "❌ 초기 수급 감지 종목 없음"
+            "❌ 조건 만족 종목 없음"
         )
 
         return
 
-    # ====================================
-    # 테마 집계
-    # ====================================
-    all_themes = []
+    # ==================================================
+    # 시장 메시지
+    # ==================================================
+    market_message = (
 
-    for stock in top_results:
+        f"📊 시장 상태: {market_status}\n\n"
 
-        all_themes.extend(
-            stock['themes']
-        )
-
-    theme_rank = {}
-
-    for theme in all_themes:
-
-        theme_rank[theme] = (
-            theme_rank.get(theme, 0)
-            + 1
-        )
-
-    sorted_themes = sorted(
-        theme_rank.items(),
-        key=lambda x: x[1],
-        reverse=True
+        f"🔥 초기 수급 후보 "
+        f"{len(top_results)}개 탐지"
     )
-
-    # ====================================
-    # 시장 테마 메시지
-    # ====================================
-    theme_message = (
-        "🔥 오늘 초기 수급 강한 테마\n\n"
-    )
-
-    for (
-        theme,
-        count
-    ) in sorted_themes:
-
-        theme_message += (
-            f"- {theme} "
-            f"({count}개 종목)\n"
-        )
 
     send_discord_message(
-        theme_message
+        market_message
     )
 
     time.sleep(1)
 
-    # ====================================
+    # ==================================================
     # 종목 메시지
-    # ====================================
+    # ==================================================
     for stock in top_results:
-
-        reason_text = ", ".join(
-            stock['reasons']
-        )
 
         message = (
 
-            f"🚨 초기 수급 감지\n\n"
+            f"🚨 [{stock['grade']}급] "
+            f"초기 수급 감지\n\n"
 
             f"🔥 종목: "
             f"{stock['name']}\n\n"
 
-            f"💡 추천 이유:\n"
-            f"{reason_text}\n\n"
-
             f"⭐ 점수: "
-            f"{stock['score']}점\n"
+            f"{stock['score']}점\n\n"
 
             f"📈 등락률: "
             f"{stock['change']}%\n"
 
-            f"📊 거래량 배수: "
+            f"📊 거래량: "
             f"{stock['volume_ratio']}배\n"
 
             f"💰 거래대금: "
@@ -601,8 +790,16 @@ def main():
             f"🛑 손절가: "
             f"{stock['stop_loss']:,}원\n\n"
 
-            f"🏷️ 테마:\n"
+            f"💡 추천 이유\n"
         )
+
+        for reason in stock['reasons']:
+
+            message += (
+                f"- {reason}\n"
+            )
+
+        message += "\n🏷️ 테마\n"
 
         if stock['themes']:
 
@@ -612,7 +809,7 @@ def main():
                     f"- {theme}\n"
                 )
 
-        message += "\n📰 뉴스:\n"
+        message += "\n📰 뉴스\n"
 
         for news in stock['news']:
 
@@ -626,9 +823,9 @@ def main():
 
         time.sleep(1)
 
-# ====================================
+# ==================================================
 # 실행
-# ====================================
+# ==================================================
 if __name__ == "__main__":
 
     main()
