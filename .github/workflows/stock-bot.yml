@@ -13,87 +13,104 @@ on:
     - cron: '0 22 * * 0'      # KST 일요일 07:00 백테스트
     - cron: '0 */2 * * *'     # 2시간마다 코인 스캔
   workflow_dispatch:
-    inputs:
-      run_mode:
-        description: '실행 모드 선택'
-        required: true
-        default: 'stock'
-        type: choice
-        options:
-          - stock
-          - coin
-          - backtest
-          - all
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  run-bot:
+  stock-scan:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '0 0 * * 1-5' ||
+      github.event.schedule == '0 2 * * 1-5' ||
+      github.event.schedule == '0 4 * * 1-5' ||
+      github.event.schedule == '0 6 * * 1-5'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Python 설치
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: 라이브러리 설치
-        run: |
-          pip install finance-datareader feedparser requests pandas ccxt
-
+      - run: pip install finance-datareader feedparser requests pandas ccxt
       - name: 주식 스캐너 실행
-        if: |
-          github.event.schedule == '0 0 * * 1-5' ||
-          github.event.schedule == '0 2 * * 1-5' ||
-          github.event.schedule == '0 4 * * 1-5' ||
-          github.event.schedule == '0 6 * * 1-5' ||
-          github.event.inputs.run_mode == 'stock' ||
-          github.event.inputs.run_mode == 'all'
         env:
           WEBHOOK_STOCK:        ${{ secrets.WEBHOOK_STOCK }}
           WEBHOOK_STOCK_WEEKLY: ${{ secrets.WEBHOOK_STOCK_WEEKLY }}
-          WEBHOOK_COIN:         ${{ secrets.WEBHOOK_COIN }}
-          WEBHOOK_COIN_WEEKLY:  ${{ secrets.WEBHOOK_COIN_WEEKLY }}
         run: python main.py
-
-      - name: 주식 추적 실행
-        if: |
-          github.event.schedule == '30 0 * * 1-5' ||
-          github.event.schedule == '30 2 * * 1-5' ||
-          github.event.schedule == '30 4 * * 1-5' ||
-          github.event.schedule == '30 6 * * 1-5'
-        env:
-          WEBHOOK_STOCK: ${{ secrets.WEBHOOK_STOCK }}
-        run: python tracker.py
-
-      - name: 코인 스캐너 실행
-        if: |
-          github.event.schedule == '0 */2 * * *' ||
-          github.event.inputs.run_mode == 'coin' ||
-          github.event.inputs.run_mode == 'all'
-        env:
-          WEBHOOK_COIN: ${{ secrets.WEBHOOK_COIN }}
-        run: python coin.py
-
-      - name: 백테스트 실행
-        if: |
-          github.event.schedule == '0 22 * * 0' ||
-          github.event.inputs.run_mode == 'backtest' ||
-          github.event.inputs.run_mode == 'all'
-        env:
-          WEBHOOK_STOCK_WEEKLY: ${{ secrets.WEBHOOK_STOCK_WEEKLY }}
-        run: python backtest.py
-
       - name: 결과 커밋
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add scan_*.json coin_*.json scanner_*.log coin_*.log positions.json backtest_result.json tracker_*.log coin_alert_cache.json || true
+          git add scan_*.json scanner_*.log positions.json || true
           git diff --cached --quiet || git commit -m "scan $(date +'%Y%m%d_%H%M')"
           git push || true
+
+  stock-track:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: |
+      github.event.schedule == '30 0 * * 1-5' ||
+      github.event.schedule == '30 2 * * 1-5' ||
+      github.event.schedule == '30 4 * * 1-5' ||
+      github.event.schedule == '30 6 * * 1-5'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install finance-datareader requests pandas
+      - name: 주식 추적 실행
+        env:
+          WEBHOOK_STOCK: ${{ secrets.WEBHOOK_STOCK }}
+        run: python tracker.py
+      - name: 결과 커밋
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add positions.json tracker_*.log || true
+          git diff --cached --quiet || git commit -m "track $(date +'%Y%m%d_%H%M')"
+          git push || true
+
+  coin-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '0 */2 * * *'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests pandas
+      - name: 코인 스캐너 실행
+        env:
+          WEBHOOK_COIN: ${{ secrets.WEBHOOK_COIN }}
+        run: python coin.py
+      - name: 결과 커밋
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add coin_*.json coin_*.log coin_alert_cache.json || true
+          git diff --cached --quiet || git commit -m "coin $(date +'%Y%m%d_%H%M')"
+          git push || true
+
+  backtest:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '0 22 * * 0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install finance-datareader requests pandas
+      - name: 백테스트 실행
+        env:
+          WEBHOOK_STOCK_WEEKLY: ${{ secrets.WEBHOOK_STOCK_WEEKLY }}
+        run: python backtest.py
