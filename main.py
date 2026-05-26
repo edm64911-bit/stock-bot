@@ -274,24 +274,38 @@ def analyze_with_gemini(stock: dict) -> dict:
         f'{{"verdict": "진입추천" 또는 "관망" 또는 "진입금지", "reason": "근거 2줄", "risk": "리스크 1줄"}}'
     )
 
-    try:
-        url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-        body = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature":     0.1,
-                "maxOutputTokens": 300,
-            }
+    url  = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature":     0.1,
+            "maxOutputTokens": 300,
         }
-        resp = requests.post(url, json=body, timeout=15)
-        resp.raise_for_status()
+    }
 
-        content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        return safe_parse_response(content)
+    # 429 Too Many Requests 시 최대 3회 재시도
+    for attempt in range(3):
+        try:
+            resp = requests.post(url, json=body, timeout=15)
 
-    except Exception as e:
-        logging.error(f"Gemini 분석 오류 [{stock['name']}]: {e}")
-        return {"verdict": "분석실패", "reason": str(e)[:50], "risk": ""}
+            if resp.status_code == 429:
+                wait = (attempt + 1) * 10
+                print(f"  ⚠️ Gemini 레이트 리밋 → {wait}초 대기 후 재시도 ({attempt+1}/3)")
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            return safe_parse_response(content)
+
+        except Exception as e:
+            logging.error(f"Gemini 분석 오류 [{stock['name']}]: {e}")
+            if attempt < 2:
+                time.sleep(5)
+                continue
+            return {"verdict": "분석실패", "reason": str(e)[:50], "risk": ""}
+
+    return {"verdict": "분석실패", "reason": "재시도 초과", "risk": ""}
 
 # ==================================================
 # 종목 분석
@@ -611,7 +625,7 @@ def main() -> None:
         stock["ai_reason"]  = ai_result.get("reason", "")
         stock["ai_risk"]    = ai_result.get("risk", "")
         print(f"  {stock['name']} → {stock['ai_verdict']}")
-        time.sleep(1)  # Gemini 무료 레이트 리밋 방지
+        time.sleep(5)  # Gemini 무료 레이트 리밋 방지 (분당 15회 제한)
 
     # ⑥ JSON 저장
     save_results(results)
