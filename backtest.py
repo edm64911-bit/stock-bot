@@ -1,14 +1,9 @@
 """
 ===================================================
-  백테스트 스크립트 v2.0
-  - scan_*.json 전부 읽어서
-  - 스캔 당일 종가 기준 5일 이내 목표가/손절가 도달 체크
-  - 전체 적중률
-  - 점수 구간별 적중률
-  - 캔들 패턴별 적중률
-  - 시간대별 적중률
-  - 테마별 적중률
-  - Discord 주간 리포트 전송
+  백테스트 스크립트 v2.1
+  변경사항:
+    - 점수 x 캔들 교차분석 추가
+    - 당일 상승률 구간별 승률 추가
 ===================================================
 """
 
@@ -39,7 +34,6 @@ def send_discord_message(message: str) -> None:
     if not WEBHOOK_URL:
         print(message)
         return
-    # Discord 메시지 2000자 제한 처리
     chunks = [message[i:i+1900] for i in range(0, len(message), 1900)]
     for chunk in chunks:
         try:
@@ -59,7 +53,6 @@ def load_all_scans() -> list:
             with open(f, "r", encoding="utf-8") as fp:
                 data = json.load(fp)
 
-            # 파일명에서 날짜/시간 추출 (scan_20250526_0900.json)
             date_str = f.replace("scan_", "").replace(".json", "")
             try:
                 hour = int(date_str.split("_")[1][:2])
@@ -78,7 +71,7 @@ def load_all_scans() -> list:
     return records
 
 # ==================================================
-# 실제 결과 체크 (스캔 다음날 ~ 5일 이내)
+# 실제 결과 체크
 # ==================================================
 def check_result(record: dict) -> dict:
     code         = record["code"]
@@ -99,29 +92,26 @@ def check_result(record: dict) -> dict:
         if len(data) == 0:
             return {**record, "result": "데이터없음", "pnl_pct": 0, "days_to_result": None}
 
-        result          = "미달성"
-        pnl_pct         = 0
-        days_to_result  = None
+        result         = "미달성"
+        pnl_pct        = 0
+        days_to_result = None
 
         for day_idx, (_, row) in enumerate(data.iterrows(), start=1):
             high = float(row["High"])
             low  = float(row["Low"])
 
-            # 손절 먼저 체크
             if low <= stop_loss:
                 result         = "손절"
                 pnl_pct        = round((stop_loss - entry_price) / entry_price * 100, 2)
                 days_to_result = day_idx
                 break
 
-            # 2차 목표
             if high >= target_2:
                 result         = "2차목표"
                 pnl_pct        = round((target_2 - entry_price) / entry_price * 100, 2)
                 days_to_result = day_idx
                 break
 
-            # 1차 목표
             if high >= target_1:
                 result         = "1차목표"
                 pnl_pct        = round((target_1 - entry_price) / entry_price * 100, 2)
@@ -135,7 +125,7 @@ def check_result(record: dict) -> dict:
         return {**record, "result": "오류", "pnl_pct": 0, "days_to_result": None}
 
 # ==================================================
-# 구간별 적중률 계산 헬퍼
+# 승률 계산 헬퍼
 # ==================================================
 def calc_win_rate(group: list) -> dict:
     valid  = [r for r in group if r["result"] not in ["데이터없음", "오류", "미달성"]]
@@ -143,10 +133,9 @@ def calc_win_rate(group: list) -> dict:
     if total == 0:
         return {"total": 0, "win2": 0, "win1": 0, "loss": 0, "win_rate": 0, "avg_pnl": 0}
 
-    win2   = len([r for r in valid if r["result"] == "2차목표"])
-    win1   = len([r for r in valid if r["result"] == "1차목표"])
-    loss   = len([r for r in valid if r["result"] == "손절"])
-    wins   = win2 + win1
+    win2    = len([r for r in valid if r["result"] == "2차목표"])
+    win1    = len([r for r in valid if r["result"] == "1차목표"])
+    loss    = len([r for r in valid if r["result"] == "손절"])
     avg_pnl = round(sum(r["pnl_pct"] for r in valid) / total, 2)
 
     return {
@@ -154,28 +143,35 @@ def calc_win_rate(group: list) -> dict:
         "win2":     win2,
         "win1":     win1,
         "loss":     loss,
-        "win_rate": round(wins / total * 100, 1),
+        "win_rate": round((win2 + win1) / total * 100, 1),
         "avg_pnl":  avg_pnl,
     }
+
+def stat_line(s: dict) -> str:
+    if s["total"] == 0:
+        return "데이터 없음"
+    return (
+        f"승률 {s['win_rate']}% "
+        f"| 2차 {s['win2']}건 1차 {s['win1']}건 손절 {s['loss']}건 "
+        f"| 평균 {s['avg_pnl']:+.1f}% ({s['total']}건)"
+    )
 
 # ==================================================
 # 전체 통계
 # ==================================================
 def calc_all_stats(results: list) -> dict:
-    valid    = [r for r in results if r["result"] not in ["데이터없음", "오류"]]
-    total    = len(valid)
-    pending  = len([r for r in valid if r["result"] == "미달성"])
-    decided  = [r for r in valid if r["result"] != "미달성"]
+    valid   = [r for r in results if r["result"] not in ["데이터없음", "오류"]]
+    pending = [r for r in valid if r["result"] == "미달성"]
+    decided = [r for r in valid if r["result"] != "미달성"]
 
-    # 전체 적중률
     overall = calc_win_rate(decided)
 
     # 점수 구간별
     score_groups = {
-        "15점 이상":  [r for r in decided if r["score"] >= 15],
-        "10~14점":   [r for r in decided if 10 <= r["score"] < 15],
-        "5~9점":     [r for r in decided if 5 <= r["score"] < 10],
-        "5점 미만":  [r for r in decided if r["score"] < 5],
+        "18점 이상 (강력추천)": [r for r in decided if r["score"] >= 18],
+        "13~17점 (추천)":      [r for r in decided if 13 <= r["score"] < 18],
+        "8~12점 (관망)":       [r for r in decided if 8 <= r["score"] < 13],
+        "8점 미만 (비추천)":   [r for r in decided if r["score"] < 8],
     }
     score_stats = {k: calc_win_rate(v) for k, v in score_groups.items()}
 
@@ -187,6 +183,25 @@ def calc_all_stats(results: list) -> dict:
         "보통":        [r for r in decided if r.get("candle") == "보통"],
     }
     candle_stats = {k: calc_win_rate(v) for k, v in candle_groups.items()}
+
+    # 점수 x 캔들 교차분석
+    cross_groups = {
+        "강력추천+장대양봉":    [r for r in decided if r["score"] >= 18 and r.get("candle") == "장대양봉"],
+        "강력추천+보통":        [r for r in decided if r["score"] >= 18 and r.get("candle") == "보통"],
+        "추천+장대양봉":        [r for r in decided if 13 <= r["score"] < 18 and r.get("candle") == "장대양봉"],
+        "추천+윗꼬리음봉":      [r for r in decided if 13 <= r["score"] < 18 and r.get("candle") == "윗꼬리음봉"],
+        "고점수+윗꼬리음봉":    [r for r in decided if r["score"] >= 13 and r.get("candle") == "윗꼬리음봉"],
+    }
+    cross_stats = {k: calc_win_rate(v) for k, v in cross_groups.items()}
+
+    # 당일 상승률 구간별
+    change_groups = {
+        "당일 5% 미만":      [r for r in decided if r.get("change", 0) < 5],
+        "당일 5~10%":        [r for r in decided if 5 <= r.get("change", 0) < 10],
+        "당일 10~15%":       [r for r in decided if 10 <= r.get("change", 0) < 15],
+        "당일 15% 이상":     [r for r in decided if r.get("change", 0) >= 15],
+    }
+    change_stats = {k: calc_win_rate(v) for k, v in change_groups.items()}
 
     # 시간대별
     hour_groups = {
@@ -208,26 +223,25 @@ def calc_all_stats(results: list) -> dict:
             theme_map["테마없음"].append(r)
     theme_stats = {k: calc_win_rate(v) for k, v in theme_map.items()}
 
-    # 최고 성과 종목 Top5
+    # Top5 수익 / 손절
     top5 = sorted(
         [r for r in decided if r["result"] in ["1차목표", "2차목표"]],
-        key=lambda x: x["pnl_pct"],
-        reverse=True
+        key=lambda x: x["pnl_pct"], reverse=True
     )[:5]
-
-    # 최저 성과 종목 Top5
     bot5 = sorted(
         [r for r in decided if r["result"] == "손절"],
         key=lambda x: x["pnl_pct"]
     )[:5]
 
     return {
-        "total":        total,
-        "pending":      pending,
+        "total":        len(valid),
+        "pending":      len(pending),
         "decided":      len(decided),
         "overall":      overall,
         "score_stats":  score_stats,
         "candle_stats": candle_stats,
+        "cross_stats":  cross_stats,
+        "change_stats": change_stats,
         "hour_stats":   hour_stats,
         "theme_stats":  theme_stats,
         "top5":         top5,
@@ -235,22 +249,11 @@ def calc_all_stats(results: list) -> dict:
     }
 
 # ==================================================
-# Discord 리포트 포맷
+# Discord 리포트
 # ==================================================
 def format_report(stats: dict, week_str: str) -> str:
     o = stats["overall"]
 
-    def stat_line(s: dict) -> str:
-        if s["total"] == 0:
-            return "데이터 없음"
-        return (
-            f"승률 {s['win_rate']}% "
-            f"| 2차 {s['win2']}건 1차 {s['win1']}건 손절 {s['loss']}건 "
-            f"| 평균 {s['avg_pnl']:+.1f}% "
-            f"({s['total']}건)"
-        )
-
-    # 전체
     msg = (
         f"📊 주간 백테스트 리포트\n"
         f"{week_str}\n\n"
@@ -258,8 +261,7 @@ def format_report(stats: dict, week_str: str) -> str:
         f"✅ 결과확정:  {stats['decided']}개\n"
         f"⏳ 미달성:    {stats['pending']}개\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 전체 적중률\n"
-        f"{stat_line(o)}\n\n"
+        f"🎯 전체 적중률\n{stat_line(o)}\n\n"
     )
 
     # 점수 구간별
@@ -270,6 +272,16 @@ def format_report(stats: dict, week_str: str) -> str:
     # 캔들 패턴별
     msg += "\n━━━━━━━━━━━━━━━━━━━\n🕯️ 캔들 패턴별 적중률\n"
     for label, s in stats["candle_stats"].items():
+        msg += f"  {label}: {stat_line(s)}\n"
+
+    # 점수 x 캔들 교차분석
+    msg += "\n━━━━━━━━━━━━━━━━━━━\n🔀 점수×캔들 교차분석\n"
+    for label, s in stats["cross_stats"].items():
+        msg += f"  {label}: {stat_line(s)}\n"
+
+    # 당일 상승률 구간별
+    msg += "\n━━━━━━━━━━━━━━━━━━━\n📈 당일 상승률별 적중률\n"
+    for label, s in stats["change_stats"].items():
         msg += f"  {label}: {stat_line(s)}\n"
 
     # 시간대별
@@ -286,32 +298,26 @@ def format_report(stats: dict, week_str: str) -> str:
     if stats["top5"]:
         msg += "\n━━━━━━━━━━━━━━━━━━━\n🏆 수익 Top5\n"
         for r in stats["top5"]:
-            msg += f"  {r['name']} | {r['pnl_pct']:+.1f}% | {r['result']} | 점수:{r['score']}\n"
+            msg += f"  {r['name']} | {r['pnl_pct']:+.1f}% | {r['result']} | 점수:{r['score']} | 캔들:{r.get('candle','?')} | 당일:{r.get('change',0):.1f}%\n"
 
     # Bot5 손절
     if stats["bot5"]:
         msg += "\n━━━━━━━━━━━━━━━━━━━\n💀 손절 Top5\n"
         for r in stats["bot5"]:
-            msg += f"  {r['name']} | {r['pnl_pct']:+.1f}% | 점수:{r['score']} | 캔들:{r.get('candle','?')}\n"
+            msg += f"  {r['name']} | {r['pnl_pct']:+.1f}% | 점수:{r['score']} | 캔들:{r.get('candle','?')} | 당일:{r.get('change',0):.1f}%\n"
 
     # 권장 조정
     msg += "\n━━━━━━━━━━━━━━━━━━━\n🔧 권장 조정\n"
-    best_score = max(
-        stats["score_stats"].items(),
-        key=lambda x: x[1]["win_rate"] if x[1]["total"] > 0 else 0
-    )
-    best_candle = max(
-        stats["candle_stats"].items(),
-        key=lambda x: x[1]["win_rate"] if x[1]["total"] > 0 else 0
-    )
-    best_hour = max(
-        stats["hour_stats"].items(),
-        key=lambda x: x[1]["win_rate"] if x[1]["total"] > 0 else 0
-    )
+    best_score  = max(stats["score_stats"].items(),  key=lambda x: x[1]["win_rate"] if x[1]["total"] > 0 else 0)
+    best_candle = max(stats["candle_stats"].items(), key=lambda x: x[1]["win_rate"] if x[1]["total"] > 0 else 0)
+    best_hour   = max(stats["hour_stats"].items(),   key=lambda x: x[1]["win_rate"] if x[1]["total"] > 0 else 0)
+    best_change = max(stats["change_stats"].items(), key=lambda x: x[1]["win_rate"] if x[1]["total"] > 0 else 0)
+
     msg += (
         f"  최고 점수구간: {best_score[0]} ({best_score[1]['win_rate']}%)\n"
         f"  최고 캔들:    {best_candle[0]} ({best_candle[1]['win_rate']}%)\n"
         f"  최고 시간대:  {best_hour[0]} ({best_hour[1]['win_rate']}%)\n"
+        f"  최고 상승률:  {best_change[0]} ({best_change[1]['win_rate']}%)\n"
     )
 
     return msg
@@ -321,7 +327,7 @@ def format_report(stats: dict, week_str: str) -> str:
 # ==================================================
 def main() -> None:
     print("=" * 50)
-    print("📊 백테스트 v2.0 시작")
+    print("📊 백테스트 v2.1 시작")
     print("=" * 50)
 
     records = load_all_scans()
@@ -329,8 +335,7 @@ def main() -> None:
         print("  ⚠️ scan_*.json 없음 — 스캐너 먼저 실행하세요")
         return
 
-    # 주간 범위 계산
-    now       = datetime.now()
+    now        = datetime.now()
     week_start = (now - timedelta(days=7)).strftime("%m/%d")
     week_end   = now.strftime("%m/%d")
     week_str   = f"{week_start} ~ {week_end}"
@@ -347,7 +352,6 @@ def main() -> None:
             f"({result['pnl_pct']:+.1f}%)"
         )
 
-    # 결과 저장
     with open("backtest_result.json", "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
     print("\n  💾 backtest_result.json 저장 완료")
