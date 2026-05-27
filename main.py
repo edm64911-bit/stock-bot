@@ -256,7 +256,7 @@ def get_investor_sentiment(code: str) -> dict:
         from pykrx import stock
         end   = (TODAY - timedelta(days=1)).strftime("%Y%m%d")
         start = (TODAY - timedelta(days=10)).strftime("%Y%m%d")
-        df    = stock.get_market_trading_volume_by_investor(start, end, code)
+        df    = stock.get_market_net_purchases_of_equities_investors(start, end, [code])
         if df is None or df.empty:
             return {"foreign": 0, "institution": 0}
         return {
