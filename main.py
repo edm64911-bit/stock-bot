@@ -10,6 +10,7 @@
     - 눌림 패턴 로직 수정
     - 거래량 표현 기준 조정
     - 섹터 ETF 테마 없음 처리 개선
+    - is_market_open() KST 요일 버그 수정
 ===================================================
 """
 
@@ -32,11 +33,9 @@ from threading import Lock
 # 장 시간 체크 (KST 09:00 ~ 15:30 평일)
 # ==================================================
 def is_market_open() -> bool:
-    now        = datetime.utcnow()
-    kst_hour   = (now.hour + 9) % 24
-    kst_minute = now.minute
-    kst_time   = kst_hour * 100 + kst_minute
-    weekday    = now.weekday()
+    now      = datetime.utcnow() + timedelta(hours=9)  # KST 변환
+    kst_time = now.hour * 100 + now.minute
+    weekday  = now.weekday()
     if weekday >= 5:
         return False
     return 900 <= kst_time <= 1530
@@ -71,25 +70,25 @@ START_DATE = (TODAY - timedelta(days=365)).strftime("%Y-%m-%d")
 # ==================================================
 GROUPS = {
     "소형": {
-        "min":          50_000_000_000,     # 500억
-        "max":          300_000_000_000,    # 3000억
+        "min":          50_000_000_000,
+        "max":          300_000_000_000,
         "limit":        400,
-        "vol_min":      2.0,                # 거래량 최소 2배
-        "amount_min":   5_000_000_000,      # 거래대금 최소 50억
+        "vol_min":      2.0,
+        "amount_min":   5_000_000_000,
     },
     "중형": {
-        "min":          300_000_000_000,    # 3000억
-        "max":          1_000_000_000_000,  # 1조
+        "min":          300_000_000_000,
+        "max":          1_000_000_000_000,
         "limit":        400,
         "vol_min":      1.5,
-        "amount_min":   3_000_000_000,      # 30억
+        "amount_min":   3_000_000_000,
     },
     "대형": {
-        "min":          1_000_000_000_000,  # 1조
-        "max":          5_000_000_000_000,  # 5조
+        "min":          1_000_000_000_000,
+        "max":          5_000_000_000_000,
         "limit":        400,
         "vol_min":      1.3,
-        "amount_min":   3_000_000_000,      # 30억
+        "amount_min":   3_000_000_000,
     },
 }
 
@@ -113,7 +112,7 @@ SECTOR_ETFS = {
     "2차전지": "305720",
     "바이오":  "244580",
     "AI":      "379800",
-    "방산":    "425810",
+    "방산":    "474220",
 }
 
 results_lock = Lock()
@@ -174,29 +173,18 @@ def check_candle_pattern(data: pd.DataFrame) -> str:
 def is_near_52w_high(data: pd.DataFrame, threshold: float = 0.90) -> bool:
     return (data["Close"].iloc[-1] / data["Close"].tail(252).max()) >= threshold
 
-# ==================================================
-# 눌림 패턴 로직 수정
-# 거래량 급등 후 가격이 빠지지 않고 유지되는지 확인
-# ==================================================
 def check_volume_consolidation(data: pd.DataFrame) -> bool:
     if len(data) < 5:
         return False
     recent      = data.tail(5)
     today_close = float(data["Close"].iloc[-1])
-
-    # 최근 5일 중 거래량 1위 날
     peak_idx    = recent["Volume"].idxmax()
     peak_loc    = recent.index.get_loc(peak_idx)
-
-    # 거래량 피크가 오늘이면 눌림 아님
     if peak_loc == len(recent) - 1:
         return False
-
-    # 거래량 피크 이후 가격이 피크 종가 대비 3% 이내 유지
     peak_close  = float(recent.loc[peak_idx, "Close"])
     if peak_close <= 0:
         return False
-
     return (today_close / peak_close) >= 0.97
 
 def get_relative_strength(stock_5d: float, kospi_data) -> float:
@@ -219,7 +207,6 @@ def get_investor_sentiment(code: str) -> dict:
         return {"foreign": 0, "institution": 0}
 
 def is_sector_etf_bullish(themes: list, etf_cache: dict) -> bool:
-    # 테마 없으면 섹터 판단 중립 (True/False 아닌 None)
     if not themes:
         return None
     for theme in themes:
@@ -261,9 +248,6 @@ def analyze_news(name: str) -> tuple:
         logging.error(f"뉴스 오류 [{name}]: {e}")
         return [], []
 
-# ==================================================
-# 뉴스성 단발 급등 키워드 감지
-# ==================================================
 NEWS_EVENT_KEYWORDS = [
     "수주", "계약", "MOU", "특허", "인수", "합병",
     "FDA", "임상", "허가", "공시", "유상증자", "전환사채",
@@ -277,22 +261,15 @@ def has_event_news(titles: list) -> bool:
             return True
     return False
 
-# ==================================================
-# 우선주 필터 강화
-# ==================================================
 def is_preferred_stock(name: str) -> bool:
     suffixes = ["우", "우B", "우C", "2우", "3우", "2우B", "3우B"]
     return any(name.endswith(s) for s in suffixes)
 
-# ==================================================
-# 점수 기반 판단 근거 자동 생성
-# ==================================================
 def generate_verdict(stock: dict) -> dict:
     score   = stock["score"]
     reasons = []
     risks   = []
 
-    # 추천 근거
     vr = stock["volume_ratio"]
     if vr > 3:
         reasons.append(f"거래량 {vr}배 급증 (강한 수급 유입)")
@@ -320,7 +297,6 @@ def generate_verdict(stock: dict) -> dict:
     elif stock["candle"] == "아랫꼬리양봉":
         reasons.append("아랫꼬리양봉 (저점 매수세)")
 
-    # 리스크
     if stock["five_day_change"] > 15:
         risks.append(f"5일 상승률 {stock['five_day_change']}% (단기 급등 부담)")
     if stock["change"] > 10:
@@ -338,12 +314,10 @@ def generate_verdict(stock: dict) -> dict:
     if stock.get("event_news"):
         risks.append("수주/계약 등 단발성 뉴스 — 다음날 빠질 수 있음")
 
-    # 구간별 추가 정보
     group = stock.get("group", "")
     if group == "소형":
         risks.append("소형주 — 변동성 크므로 포지션 사이즈 주의")
 
-    # 판단
     if score >= 18:
         verdict = "✅ 강력 추천"
     elif score >= 13:
@@ -359,15 +333,11 @@ def generate_verdict(stock: dict) -> dict:
         "risks":   risks[:2],
     }
 
-# ==================================================
-# 종목 분석
-# ==================================================
 def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) -> dict | None:
     code = row["Code"]
     name = row["Name"]
 
     try:
-        # 기본 필터
         if "ETF" in name:
             return None
         if is_preferred_stock(name):
@@ -396,7 +366,6 @@ def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) 
         volume_ratio  = today_volume / avg_volume
         trading_value = today_close * today_volume
 
-        # 구간별 거래량/거래대금 기준 적용
         if volume_ratio < group_cfg["vol_min"]:
             return None
         if trading_value < group_cfg["amount_min"]:
@@ -432,58 +401,45 @@ def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) 
         sector_bullish    = is_sector_etf_bullish(detected_themes, etf_cache)
         event_news        = has_event_news(news_titles)
 
-        # 점수 계산
         score = 0
 
-        # 거래량
         if volume_ratio > 3:           score += 5
         elif volume_ratio > 2:         score += 3
         elif volume_ratio > 1.5:       score += 1
 
-        # 당일 상승률
         if 0 < change_pct < 5:         score += 3
         elif change_pct >= 5:          score += 1
 
-        # RSI 세분화
         if today_rsi < 60:             score += 2
         elif today_rsi < 65:           score += 1
-        elif today_rsi < 70:           score += 0  # 중립
-        elif today_rsi < 75:           score -= 2  # 과열 구간 감점
+        elif today_rsi < 70:           score += 0
+        elif today_rsi < 75:           score -= 2
 
-        # 거래대금
         if trading_value > 10_000_000_000:  score += 3
         elif trading_value > 5_000_000_000: score += 1
 
-        # 테마
         score += len(detected_themes) * 2
 
-        # 차트 패턴
         if near_52w_high:              score += 3
         if vol_consolidation:          score += 2
         if above_ma20:                 score += 2
         else:                          score -= 1
 
-        # 상대강도
         if relative_strength > 5:      score += 3
         elif relative_strength > 2:    score += 1
 
-        # 수급
         if investor["foreign"] > 0:    score += 3
         if investor["institution"] > 0:score += 2
 
-        # 섹터
-        if sector_bullish is False:    score -= 3  # None이면 감점 없음
+        if sector_bullish is False:    score -= 3
 
-        # 캔들
         if candle == "장대양봉":           score += 3
         elif candle == "아랫꼬리양봉":     score += 2
         elif candle == "윗꼬리음봉":       score -= 2
 
-        # 소형주 거래량 추가 점수
         if group_name == "소형" and volume_ratio >= 2.0:
             score += 2
 
-        # 뉴스성 단발 이벤트 감점
         if event_news:                 score -= 2
 
         if score < 3:
@@ -526,11 +482,7 @@ def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) 
             send_discord_error(f"연결 오류 [{name}]")
         return None
 
-# ==================================================
-# 결과 JSON 저장
-# ==================================================
 def sanitize_for_json(obj):
-    """NaN, Inf 등 JSON 비호환 값을 None으로 변환"""
     if isinstance(obj, float):
         if obj != obj or obj == float('inf') or obj == float('-inf'):
             return None
@@ -551,9 +503,6 @@ def save_results(results: list) -> None:
     except Exception as e:
         logging.error(f"결과 저장 실패: {e}")
 
-# ==================================================
-# tracker 연동 (진행중인 것만 중복 체크)
-# ==================================================
 def save_positions(top_results: list) -> None:
     filename = "positions.json"
     try:
@@ -563,7 +512,6 @@ def save_positions(top_results: list) -> None:
         else:
             positions = []
 
-        # 진행중인 것만 중복 체크
         existing_codes = {p["code"] for p in positions if p["status"] == "진행중"}
 
         for stock in top_results:
@@ -591,9 +539,6 @@ def save_positions(top_results: list) -> None:
     except Exception as e:
         logging.error(f"포지션 저장 실패: {e}")
 
-# ==================================================
-# Discord 포맷
-# ==================================================
 def format_discord_message(stock: dict, rank: int) -> str:
     candle_emoji = {
         "장대양봉":    "🕯️ 장대양봉",
@@ -667,17 +612,11 @@ def format_discord_message(stock: dict, rank: int) -> str:
 
     return msg
 
-# ==================================================
-# 메인
-# ==================================================
 def main() -> None:
 
-    # ① 장 시간 체크
     if not is_market_open():
-        now_utc = datetime.utcnow()
-        kst_h   = (now_utc.hour + 9) % 24
-        kst_m   = now_utc.minute
-        print(f"⏸ 장 시간 외 — 실행 생략 (현재 KST {kst_h:02d}:{kst_m:02d})")
+        now_kst = datetime.utcnow() + timedelta(hours=9)
+        print(f"⏸ 장 시간 외 — 실행 생략 (현재 KST {now_kst.hour:02d}:{now_kst.minute:02d})")
         sys.exit(0)
 
     start_time = time.time()
@@ -686,7 +625,6 @@ def main() -> None:
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print("=" * 50)
 
-    # ② KOSPI 로딩
     print("\n📊 KOSPI 데이터 로딩 중...")
     try:
         kospi_data = fdr.DataReader("KS11", START_DATE)
@@ -695,16 +633,13 @@ def main() -> None:
         kospi_data = None
         print("  ⚠️ KOSPI 로딩 실패 — 상대강도 생략")
 
-    # ③ 섹터 ETF 캐시
     print("\n📦 섹터 ETF 로딩 중...")
     etf_cache = load_etf_cache()
 
-    # ④ 전체 종목 로딩
     print("\n📋 KRX 종목 로딩 중...")
     all_stocks = fdr.StockListing("KRX")
     all_stocks = all_stocks[all_stocks["Market"].isin(["KOSPI", "KOSDAQ"])]
 
-    # ⑤ 구간별 종목 분리
     target_stocks = []
     for group_name, cfg in GROUPS.items():
         group = all_stocks[
@@ -720,9 +655,8 @@ def main() -> None:
     combined = pd.concat(target_stocks)
     print(f"  총 분석 대상: {len(combined)}개\n")
 
-    # ⑥ 멀티스레드 분석
     results = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=15) as executor:
         futures = {
             executor.submit(
                 analyze_stock,
@@ -754,20 +688,15 @@ def main() -> None:
         send_discord_message(msg, WEBHOOK_STOCK)
         return
 
-    # ⑦ 판단 근거 생성
     for stock in top_results:
         verdict_info      = generate_verdict(stock)
         stock["verdict"]  = verdict_info["verdict"]
         stock["reasons"]  = verdict_info["reasons"]
         stock["risks"]    = verdict_info["risks"]
 
-    # ⑧ JSON 저장
     save_results(results)
-
-    # ⑨ positions 저장
     save_positions(top_results)
 
-    # ⑩ Discord 전송
     for rank, stock in enumerate(top_results, start=1):
         message = format_discord_message(stock, rank)
         print(message)
