@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: 라이브러리 설치
-        run: pip install finance-datareader feedparser requests pandas ccxt
+        run: pip install finance-datareader feedparser requests pandas ccxt pykrx
       - name: 주식 스캐너 실행
         env:
           WEBHOOK_STOCK:        ${{ secrets.WEBHOOK_STOCK }}
