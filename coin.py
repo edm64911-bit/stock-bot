@@ -629,11 +629,8 @@ def main() -> None:
         coin["verdict"]   = verdict_info["verdict"]
         coin["reasons"]   = verdict_info["reasons"]
         coin["risks"]     = verdict_info["risks"]
-        if coin["score"] >= 13:
-            coin["ai_analysis"] = get_ai_analysis(coin)
-            time.sleep(10)
-        else:
-            coin["ai_analysis"] = ""
+        coin["ai_analysis"] = get_ai_analysis(coin)
+        time.sleep(1)
 
     sent_count = 0
     for rank, coin in enumerate(top_results, start=1):

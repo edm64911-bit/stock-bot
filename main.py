@@ -763,11 +763,8 @@ def main() -> None:
         stock["verdict"]  = verdict_info["verdict"]
         stock["reasons"]  = verdict_info["reasons"]
         stock["risks"]    = verdict_info["risks"]
-        if stock["score"] >= 13:
-            stock["ai_analysis"] = get_ai_analysis(stock)
-            time.sleep(10)
-        else:
-            stock["ai_analysis"] = ""
+        stock["ai_analysis"] = get_ai_analysis(stock)
+        time.sleep(1)
 
     save_results(results)
     save_positions(top_results)
