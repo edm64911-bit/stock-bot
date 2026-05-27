@@ -193,15 +193,65 @@ def get_relative_strength(stock_5d: float, kospi_data) -> float:
     kospi_5d = ((kospi_data["Close"].iloc[-1] / kospi_data["Close"].iloc[-5]) - 1) * 100
     return round(stock_5d - kospi_5d, 2)
 
+# ==================================================
+# OpenRouter AI 분석
+# ==================================================
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
+def get_ai_analysis(stock: dict) -> str:
+    if not OPENROUTER_API_KEY:
+        return ""
+    try:
+        prompt = f"""당신은 주식 트레이딩 전문가입니다.
+아래 종목 데이터를 보고 매수/관망/비추천 중 하나로 판단하고 이유를 2-3줄로 설명해주세요.
+
+종목: {stock['name']} ({stock['code']})
+당일 상승률: {stock['change']}%
+5일 상승률: {stock['five_day_change']}%
+거래량: {stock['volume_ratio']}배
+RSI: {stock['rsi']}
+상대강도: {stock['relative_strength']}%
+거래대금: {stock['trading_value']}억
+캔들: {stock['candle']}
+MA20: {'위' if stock['above_ma20'] else '아래'}
+52주 신고가 근접: {stock['near_52w_high']}
+외국인 3일: {stock['foreign_net']:+,}주
+기관 3일: {stock['institution_net']:+,}주
+테마: {', '.join(stock['themes']) if stock['themes'] else '없음'}
+최근 뉴스: {' / '.join(stock['news'][:2]) if stock['news'] else '없음'}
+
+한국어로 3줄 이내로 답변하세요."""
+
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "google/gemini-2.0-flash-exp:free",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 300,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logging.error(f"AI 분석 실패 [{stock['name']}]: {e}")
+        return ""
+    
 def get_investor_sentiment(code: str) -> dict:
     try:
-        start = (TODAY - timedelta(days=10)).strftime("%Y-%m-%d")
-        df    = fdr.DataReader(code, start, exchange="KRX-INVESTOR")
-        if df is None or len(df) < 1:
+        from pykrx import stock
+        end   = (TODAY - timedelta(days=1)).strftime("%Y%m%d")
+        start = (TODAY - timedelta(days=10)).strftime("%Y%m%d")
+        df    = stock.get_market_trading_volume_by_investor(start, end, code)
+        if df is None or df.empty:
             return {"foreign": 0, "institution": 0}
         return {
-            "foreign":     int(df["Foreign"].iloc[-3:].sum()),
-            "institution": int(df["Institution"].iloc[-3:].sum()),
+            "foreign":     int(df["외국인합계"].iloc[-3:].sum()) if "외국인합계" in df.columns else 0,
+            "institution": int(df["기관합계"].iloc[-3:].sum())   if "기관합계"   in df.columns else 0,
         }
     except Exception:
         return {"foreign": 0, "institution": 0}
@@ -610,6 +660,9 @@ def format_discord_message(stock: dict, rank: int) -> str:
     if stock["news"]:
         msg += "\n\n📰 뉴스\n" + "\n".join(f"  • {n}" for n in stock["news"])
 
+    if stock.get("ai_analysis"):
+        msg += f"\n\n🤖 AI 분석\n  {stock['ai_analysis']}"
+
     return msg
 
 def main() -> None:
@@ -693,6 +746,7 @@ def main() -> None:
         stock["verdict"]  = verdict_info["verdict"]
         stock["reasons"]  = verdict_info["reasons"]
         stock["risks"]    = verdict_info["risks"]
+        stock["ai_analysis"] = get_ai_analysis(stock)
 
     save_results(results)
     save_positions(top_results)
