@@ -199,6 +199,7 @@ def get_relative_strength(stock_5d: float, kospi_data) -> float:
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 def get_ai_analysis(stock: dict) -> str:
+    print(f"  🔑 API KEY 확인: {'있음' if OPENROUTER_API_KEY else '없음'} ({OPENROUTER_API_KEY[:10] if OPENROUTER_API_KEY else 'EMPTY'})")
     if not OPENROUTER_API_KEY:
         return ""
     try:
