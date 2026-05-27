@@ -22,11 +22,13 @@ jobs:
           WEBHOOK_STOCK:        ${{ secrets.WEBHOOK_STOCK }}
           WEBHOOK_STOCK_WEEKLY: ${{ secrets.WEBHOOK_STOCK_WEEKLY }}
           OPENROUTER_API_KEY:   ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
       - name: 코인 스캐너 실행
         env:
           WEBHOOK_COIN:       ${{ secrets.WEBHOOK_COIN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
         run: python coin.py
       - name: 주식 추적 실행
         env:
