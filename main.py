@@ -223,15 +223,17 @@ def get_ai_analysis(stock: dict) -> str:
 - MACD, OBV, 다이버전스 등 입력되지 않은 지표 언급 금지
 - "~일 수 있다" 같은 추측성 표현 최소화
 - 반드시 제공된 수치 기반으로만 분석하세요
-- 각 지표를 개별 나열하지 말고 반드시 지표 간 관계를 연결해서 해석하세요
-- 판단 기준 예시:
-  * 거래량 증가 + 종가위치 낮음(30% 이하) → 고점 분배 가능성
-  * 신고가 근접 + 종가위치 높음(70% 이상) → 돌파 지속 가능성
-  * 5일 급등(15% 이상) + 윗꼬리 + 종가위치 낮음 → 추격 기대값 낮음
-  * 거래량 급증 + 눌림패턴 + 종가위치 중간 → 건강한 조정 후 재진입 가능성
-  * RSI 65 이상 + 5일 급등 + 윗꼬리 → 단기 과열, 추격 위험
-  * 거래량 증가 + MA20 위 + 종가위치 높음 → 매집 가능성
-- 단순 feature 나열 금지, 반드시 "왜 위험한지" "왜 강한지" 연결해서 설명하세요
+중요:
+단순 feature 나열 금지.
+반드시 지표 간 관계를 해석하세요.
+
+예:
+- 거래량 증가 + 종가 약세 → 분배 가능성
+- 신고가 근접 + 종가 강세 → 돌파 지속 가능성
+- 단기 급등 + 윗꼬리 → 추격 위험 증가
+
+반드시 "왜 강한지", "왜 위험한지"를 연결해서 설명하세요.
+3~5줄만 짧고 실전적으로 작성하세요.
 
 [종목 데이터]
 종목: {stock['name']} ({stock['code']}) / {stock.get('group','')}주
@@ -288,8 +290,7 @@ def load_investor_cache() -> dict:
             df = stock.get_market_net_purchases_of_equities_by_ticker(
                 fromdate=start,
                 todate=today,
-                market=market,
-                etf=False
+                market=market
             )
             if df is None or df.empty:
                 continue
@@ -452,8 +453,9 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
 
         change_pct      = (today_close - yesterday_close) / yesterday_close * 100
         five_day_change = (today_close - data["Close"].iloc[-5]) / data["Close"].iloc[-5] * 100
-        if five_day_change > 20:
-            return None
+
+        if five_day_change > 35:
+            pass  # 점수로 처리
 
         avg_volume   = data["Volume"].iloc[-11:-1].mean()
         today_volume = float(data["Volume"].iloc[-1])
@@ -469,8 +471,6 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
             return None
 
         today_rsi = calculate_rsi(data["Close"])
-        if today_rsi > 75:
-            return None
 
         ma20       = float(data["Close"].tail(20).mean())
         above_ma20 = today_close >= ma20
@@ -526,6 +526,9 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
 
         score = 0
 
+        if five_day_change > 35:       score -= 4
+        elif five_day_change > 25:     score -= 2
+
         if volume_ratio > 3:           score += 5
         elif volume_ratio > 2:         score += 3
         elif volume_ratio > 1.5:       score += 1
@@ -537,6 +540,7 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         elif today_rsi < 65:           score += 1
         elif today_rsi < 70:           score += 0
         elif today_rsi < 75:           score -= 2
+        else:                          score -= 3
 
         if trading_value > 10_000_000_000:  score += 3
         elif trading_value > 5_000_000_000: score += 1
@@ -559,6 +563,13 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         if candle == "장대양봉":           score += 3
         elif candle == "아랫꼬리양봉":     score += 2
         elif candle == "윗꼬리음봉":       score -= 2
+
+        if close_pos >= 70:            score += 4
+        elif close_pos >= 50:          score += 2
+        elif close_pos < 30:           score -= 5
+
+        if upper_tail > 50:            score -= 4
+        elif upper_tail > 30:          score -= 2
 
         if group_name == "소형" and volume_ratio >= 2.0:
             score += 2
