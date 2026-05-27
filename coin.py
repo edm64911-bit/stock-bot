@@ -440,7 +440,11 @@ MA20: {'위' if coin['above_ma_4h'] else '아래'}
                 "Content-Type": "application/json",
             },
             json={
-                "model": "google/gemini-2.0-flash-exp:free",
+                "models": [
+                    "google/gemini-2.0-flash-exp:free",
+                    "meta-llama/llama-3.3-70b-instruct:free",
+                    "mistralai/mistral-7b-instruct:free",
+                ],
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 300,
             },
