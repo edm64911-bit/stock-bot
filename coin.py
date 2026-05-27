@@ -409,8 +409,57 @@ def analyze_coin(market: str, ticker: dict) -> dict | None:
 # OpenRouter AI 분석
 # ==================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
+
+GEMINI_MODELS = [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+]
 
 def get_ai_analysis(coin: dict) -> str:
+    if not GEMINI_API_KEY:
+        return ""
+    for model in GEMINI_MODELS:
+        try:
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{
+                        "parts": [{"text": f"""당신은 암호화폐 트레이딩 전문가입니다.
+아래 코인 데이터를 보고 매수/관망/비추천 중 하나로 판단하고 이유를 2-3줄로 설명해주세요.
+
+종목: {coin['code']}/KRW
+당일 변동: {coin['change_pct']}%
+거래대금: {coin['trade_value_억']}억
+4시간봉 RSI: {coin['rsi_4h']}
+1시간봉 RSI: {coin['rsi_1h']}
+15분봉 RSI: {coin['rsi_15m']}
+MA20: {'위' if coin['above_ma_4h'] else '아래'}
+타임프레임 일치: {coin['tf_bullish']}/3
+1시간봉 거래량: {coin['vol_ratio_1h']}배
+15분봉 거래량: {coin['vol_ratio_15m']}배
+고점 근접: {coin['near_high']}
+눌림 패턴: {coin['pullback']}
+펌핑 의심: {coin['pump_warning']}
+
+한국어로 3줄 이내로 답변하세요."""}]
+                    }]
+                },
+                timeout=15,
+            )
+            if resp.status_code == 429:
+                continue
+            resp.raise_for_status()
+            content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            content = content.replace("```", "").replace("**", "").strip()
+            return content
+        except Exception as e:
+            logging.error(f"AI 분석 실패 [{coin['code']}] ({model}): {e}")
+            print(f"  ❌ AI 분석 실패 [{coin['code']}] ({model}): {e}")
+            continue
+    return ""coin: dict) -> str:
     if not OPENROUTER_API_KEY:
         return ""
     try:

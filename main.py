@@ -197,8 +197,58 @@ def get_relative_strength(stock_5d: float, kospi_data) -> float:
 # OpenRouter AI 분석
 # ==================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
+
+GEMINI_MODELS = [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+]
 
 def get_ai_analysis(stock: dict) -> str:
+    if not GEMINI_API_KEY:
+        return ""
+    for model in GEMINI_MODELS:
+        try:
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{
+                        "parts": [{"text": f"""당신은 주식 트레이딩 전문가입니다.
+아래 종목 데이터를 보고 매수/관망/비추천 중 하나로 판단하고 이유를 2-3줄로 설명해주세요.
+
+종목: {stock['name']} ({stock['code']})
+당일 상승률: {stock['change']}%
+5일 상승률: {stock['five_day_change']}%
+거래량: {stock['volume_ratio']}배
+RSI: {stock['rsi']}
+상대강도: {stock['relative_strength']}%
+거래대금: {stock['trading_value']}억
+캔들: {stock['candle']}
+MA20: {'위' if stock['above_ma20'] else '아래'}
+52주 신고가 근접: {stock['near_52w_high']}
+외국인 3일: {stock['foreign_net']:+,}주
+기관 3일: {stock['institution_net']:+,}주
+테마: {', '.join(stock['themes']) if stock['themes'] else '없음'}
+최근 뉴스: {' / '.join(stock['news'][:2]) if stock['news'] else '없음'}
+
+한국어로 3줄 이내로 답변하세요."""}]
+                    }]
+                },
+                timeout=15,
+            )
+            if resp.status_code == 429:
+                continue
+            resp.raise_for_status()
+            content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            content = content.replace("```", "").replace("**", "").strip()
+            return content
+        except Exception as e:
+            logging.error(f"AI 분석 실패 [{stock['name']}] ({model}): {e}")
+            print(f"  ❌ AI 분석 실패 [{stock['name']}] ({model}): {e}")
+            continue
+    return ""stock: dict) -> str:
     print(f"  🔑 API KEY 확인: {'있음' if OPENROUTER_API_KEY else '없음'} ({OPENROUTER_API_KEY[:10] if OPENROUTER_API_KEY else 'EMPTY'})")
     if not OPENROUTER_API_KEY:
         return ""
