@@ -438,6 +438,8 @@ MA20: {'위' if coin['above_ma_4h'] else '아래'}
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/stock-bot",
+                "X-Title": "Stock Bot",
             },
             json={
                 "models": [

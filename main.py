@@ -227,6 +227,8 @@ MA20: {'위' if stock['above_ma20'] else '아래'}
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/stock-bot",
+                "X-Title": "Stock Bot",
             },
             json={
                 "models": [
