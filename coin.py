@@ -459,8 +459,9 @@ MA20: {'위' if coin['above_ma_4h'] else '아래'}
             logging.error(f"AI 분석 실패 [{coin['code']}] ({model}): {e}")
             print(f"  ❌ AI 분석 실패 [{coin['code']}] ({model}): {e}")
             continue
-    
-    
+    return ""
+
+
 def generate_verdict(coin: dict) -> dict:
     score   = coin["score"]
     reasons = []

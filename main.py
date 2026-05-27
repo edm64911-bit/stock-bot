@@ -248,8 +248,9 @@ MA20: {'위' if stock['above_ma20'] else '아래'}
             logging.error(f"AI 분석 실패 [{stock['name']}] ({model}): {e}")
             print(f"  ❌ AI 분석 실패 [{stock['name']}] ({model}): {e}")
             continue
-    
-    
+    return ""
+
+
 def get_investor_sentiment(code: str) -> dict:
     try:
         from pykrx import stock
