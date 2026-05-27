@@ -32,7 +32,8 @@ jobs:
         run: python coin.py
       - name: 주식 추적 실행
         env:
-          WEBHOOK_STOCK: ${{ secrets.WEBHOOK_STOCK }}
+          WEBHOOK_STOCK:  ${{ secrets.WEBHOOK_STOCK }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python tracker.py
       - name: 백테스트 실행
         env:
