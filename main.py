@@ -201,8 +201,8 @@ GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
 
 GEMINI_MODELS = [
     "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
-    "gemini-2.5-pro",
 ]
 
 def get_ai_analysis(stock: dict) -> str:
@@ -246,7 +246,7 @@ MACD: {stock.get('macd_cross','?')}
 [한줄 결론] 냉정하게 한줄 요약"""}]
                     }]
                 },
-                timeout=15,
+                timeout=30,
             )
             if resp.status_code == 429:
                 continue
