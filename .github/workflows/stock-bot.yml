@@ -1,59 +1,39 @@
 name: Stock Bot
-
 on:
   schedule:
-    - cron: '0 0 * * 1-5'
-    - cron: '0 2 * * 1-5'
-    - cron: '0 4 * * 1-5'
-    - cron: '0 6 * * 1-5'
-    - cron: '30 0 * * 1-5'
-    - cron: '30 2 * * 1-5'
-    - cron: '30 4 * * 1-5'
-    - cron: '30 6 * * 1-5'
-    - cron: '0 22 * * 0'
     - cron: '0 */2 * * *'
   workflow_dispatch:
-
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: 라이브러리 설치
         run: pip install finance-datareader feedparser requests pandas ccxt
-
       - name: 주식 스캐너 실행
         env:
           WEBHOOK_STOCK:        ${{ secrets.WEBHOOK_STOCK }}
           WEBHOOK_STOCK_WEEKLY: ${{ secrets.WEBHOOK_STOCK_WEEKLY }}
         run: python main.py
-
       - name: 코인 스캐너 실행
         env:
           WEBHOOK_COIN: ${{ secrets.WEBHOOK_COIN }}
         run: python coin.py
-
       - name: 주식 추적 실행
         env:
           WEBHOOK_STOCK: ${{ secrets.WEBHOOK_STOCK }}
         run: python tracker.py
-
       - name: 백테스트 실행
         env:
           WEBHOOK_STOCK_WEEKLY: ${{ secrets.WEBHOOK_STOCK_WEEKLY }}
         run: python backtest.py || true
-
       - name: 결과 커밋
         run: |
           git config user.name "github-actions"
