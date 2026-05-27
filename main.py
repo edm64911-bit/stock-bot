@@ -266,65 +266,33 @@ MACD: {stock.get('macd_cross','?')}
     return ""
 
 
-def get_investor_sentiment(code: str) -> dict:
-    """
-    네이버 금융 investor API로 3일 외국인/기관 순매수 조회.
-    실패 시 0으로 fallback (점수 영향 없음).
-    """
+def get_investor_sentiment(code: str, investor_cache: dict) -> dict:
+    return investor_cache.get(code, {"foreign": 0, "institution": 0})
+
+def load_investor_cache() -> dict:
     try:
-        url = (
-            f"https://fchart.stock.naver.com/siseJson.nhn"
-            f"?symbol={code}&requestType=1&startTime=&count=5&timeframe=day"
-        )
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=5)
-        # naver investor 별도 엔드포인트
-        inv_url = (
-            f"https://finance.naver.com/item/frgn.naver?code={code}"
-        )
-        inv_resp = requests.get(inv_url, headers=headers, timeout=5)
-        inv_resp.raise_for_status()
-
-        # pandas로 테이블 파싱
-        tables = pd.read_html(inv_resp.text, encoding="euc-kr")
-        if not tables:
-            return {"foreign": 0, "institution": 0}
-
-        df = tables[0]
-        # 컬럼 구조: 날짜 | 종가 | ... | 외국인 순매수 | 기관 순매수
-        # 컬럼명이 다를 수 있어 위치 기반으로 접근
-        if df.shape[1] < 6:
-            return {"foreign": 0, "institution": 0}
-
-        # 최근 3행
-        recent = df.head(3)
-
-        def to_int_sum(col_data):
-            total = 0
-            for v in col_data:
-                try:
-                    total += int(str(v).replace(",", "").replace("+", "").strip())
-                except Exception:
-                    pass
-            return total
-
-        # 외국인 순매수: 컬럼 인덱스 탐색
-        foreign_col = None
-        institution_col = None
-        for col in df.columns:
-            col_str = str(col).replace(" ", "")
-            if "외국인" in col_str and "순매수" in col_str:
-                foreign_col = col
-            if "기관" in col_str and "순매수" in col_str:
-                institution_col = col
-
-        foreign     = to_int_sum(recent[foreign_col])     if foreign_col     is not None else 0
-        institution = to_int_sum(recent[institution_col]) if institution_col is not None else 0
-
-        return {"foreign": foreign, "institution": institution}
-
-    except Exception:
-        return {"foreign": 0, "institution": 0}
+        from pykrx import stock
+        today = (TODAY - timedelta(days=1)).strftime("%Y%m%d")
+        start = (TODAY - timedelta(days=10)).strftime("%Y%m%d")
+        cache = {}
+        for market in ["KOSPI", "KOSDAQ"]:
+            df = stock.get_market_net_purchases_of_equities_by_ticker(
+                fromdate=start,
+                todate=today,
+                market=market,
+                etf=False
+            )
+            if df is None or df.empty:
+                continue
+            for ticker in df.index:
+                foreign     = int(df.loc[ticker, "외국인합계"]) if "외국인합계" in df.columns else 0
+                institution = int(df.loc[ticker, "기관합계"])   if "기관합계"   in df.columns else 0
+                cache[ticker] = {"foreign": foreign, "institution": institution}
+        print(f"  수급 캐시 로딩 완료: {len(cache)}개 종목")
+        return cache
+    except Exception as e:
+        print(f"  ⚠️ 수급 캐시 로딩 실패: {e}")
+        return {}
 
 def is_sector_etf_bullish(themes: list, etf_cache: dict) -> bool:
     if not themes:
@@ -453,7 +421,7 @@ def generate_verdict(stock: dict) -> dict:
         "risks":   risks[:2],
     }
 
-def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) -> dict | None:
+def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: dict, group_name: str) -> dict | None:
     code = row["Code"]
     name = row["Name"]
 
@@ -542,7 +510,7 @@ def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) 
         close_pos  = round((close_p - low_p) / (high_p - low_p) * 100, 1) if high_p != low_p else 50
         ma_align   = "정배열" if ma5 > ma20 > ma60 and ma60 > 0 else "역배열" if ma5 < ma20 < ma60 and ma60 > 0 else "혼조"
         relative_strength = get_relative_strength(five_day_change, kospi_data)
-        investor          = get_investor_sentiment(code)
+        investor          = get_investor_sentiment(code, investor_cache)
         news_titles, detected_themes = analyze_news(name)
         sector_bullish    = is_sector_etf_bullish(detected_themes, etf_cache)
         event_news        = has_event_news(news_titles)
@@ -823,6 +791,9 @@ def main() -> None:
     print("\n📦 섹터 ETF 로딩 중...")
     etf_cache = load_etf_cache()
 
+    print("\n👥 투자자 수급 로딩 중...")
+    investor_cache = load_investor_cache()
+
     print("\n📋 KRX 종목 로딩 중...")
     all_stocks = fdr.StockListing("KRX")
     all_stocks = all_stocks[all_stocks["Market"].isin(["KOSPI", "KOSDAQ"])]
@@ -850,6 +821,7 @@ def main() -> None:
                 row,
                 kospi_data,
                 etf_cache,
+                investor_cache,
                 row["_group_cfg"],
                 row["_group"]
             ): row["Name"]
