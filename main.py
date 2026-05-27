@@ -243,9 +243,11 @@ MA20: {'위' if stock['above_ma20'] else '아래'}
             timeout=15,
         )
         resp.raise_for_status()
-        result = resp.json()
-        print(f"  🤖 AI 응답: {result}")
-        return result["choices"][0]["message"]["content"].strip()
+        result  = resp.json()
+        content = result["choices"][0]["message"]["content"].strip()
+        # 불필요한 마크다운/특수문자 정제
+        content = content.replace("```", "").replace("**", "").strip()
+        return content
     except Exception as e:
         logging.error(f"AI 분석 실패 [{stock['name']}]: {e}")
         print(f"  ❌ AI 분석 실패 [{stock['name']}]: {e}")
@@ -765,6 +767,7 @@ def main() -> None:
         stock["reasons"]  = verdict_info["reasons"]
         stock["risks"]    = verdict_info["risks"]
         stock["ai_analysis"] = get_ai_analysis(stock)
+        time.sleep(2)
 
     save_results(results)
     save_positions(top_results)

@@ -630,6 +630,7 @@ def main() -> None:
         coin["reasons"]   = verdict_info["reasons"]
         coin["risks"]     = verdict_info["risks"]
         coin["ai_analysis"] = get_ai_analysis(coin)
+        time.sleep(2)
 
     sent_count = 0
     for rank, coin in enumerate(top_results, start=1):
