@@ -459,56 +459,7 @@ MA20: {'위' if coin['above_ma_4h'] else '아래'}
             logging.error(f"AI 분석 실패 [{coin['code']}] ({model}): {e}")
             print(f"  ❌ AI 분석 실패 [{coin['code']}] ({model}): {e}")
             continue
-    return ""coin: dict) -> str:
-    if not OPENROUTER_API_KEY:
-        return ""
-    try:
-        prompt = f"""당신은 암호화폐 트레이딩 전문가입니다.
-아래 코인 데이터를 보고 매수/관망/비추천 중 하나로 판단하고 이유를 2-3줄로 설명해주세요.
-
-종목: {coin['code']}/KRW
-당일 변동: {coin['change_pct']}%
-거래대금: {coin['trade_value_억']}억
-4시간봉 RSI: {coin['rsi_4h']}
-1시간봉 RSI: {coin['rsi_1h']}
-15분봉 RSI: {coin['rsi_15m']}
-MA20: {'위' if coin['above_ma_4h'] else '아래'}
-타임프레임 일치: {coin['tf_bullish']}/3
-1시간봉 거래량: {coin['vol_ratio_1h']}배
-15분봉 거래량: {coin['vol_ratio_15m']}배
-고점 근접: {coin['near_high']}
-눌림 패턴: {coin['pullback']}
-펌핑 의심: {coin['pump_warning']}
-
-한국어로 3줄 이내로 답변하세요."""
-
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/stock-bot",
-                "X-Title": "Stock Bot",
-            },
-            json={
-                "models": [
-                    "google/gemini-2.0-flash-exp:free",
-                    "meta-llama/llama-3.3-70b-instruct:free",
-                    "mistralai/mistral-7b-instruct:free",
-                ],
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 300,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        print(f"  🤖 AI 응답: {result}")
-        return result["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        logging.error(f"AI 분석 실패 [{coin['code']}]: {e}")
-        print(f"  ❌ AI 분석 실패 [{coin['code']}]: {e}")
-        return ""
+    
     
 def generate_verdict(coin: dict) -> dict:
     score   = coin["score"]

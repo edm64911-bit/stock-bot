@@ -248,60 +248,7 @@ MA20: {'위' if stock['above_ma20'] else '아래'}
             logging.error(f"AI 분석 실패 [{stock['name']}] ({model}): {e}")
             print(f"  ❌ AI 분석 실패 [{stock['name']}] ({model}): {e}")
             continue
-    return ""stock: dict) -> str:
-    print(f"  🔑 API KEY 확인: {'있음' if OPENROUTER_API_KEY else '없음'} ({OPENROUTER_API_KEY[:10] if OPENROUTER_API_KEY else 'EMPTY'})")
-    if not OPENROUTER_API_KEY:
-        return ""
-    try:
-        prompt = f"""당신은 주식 트레이딩 전문가입니다.
-아래 종목 데이터를 보고 매수/관망/비추천 중 하나로 판단하고 이유를 2-3줄로 설명해주세요.
-
-종목: {stock['name']} ({stock['code']})
-당일 상승률: {stock['change']}%
-5일 상승률: {stock['five_day_change']}%
-거래량: {stock['volume_ratio']}배
-RSI: {stock['rsi']}
-상대강도: {stock['relative_strength']}%
-거래대금: {stock['trading_value']}억
-캔들: {stock['candle']}
-MA20: {'위' if stock['above_ma20'] else '아래'}
-52주 신고가 근접: {stock['near_52w_high']}
-외국인 3일: {stock['foreign_net']:+,}주
-기관 3일: {stock['institution_net']:+,}주
-테마: {', '.join(stock['themes']) if stock['themes'] else '없음'}
-최근 뉴스: {' / '.join(stock['news'][:2]) if stock['news'] else '없음'}
-
-한국어로 3줄 이내로 답변하세요."""
-
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/stock-bot",
-                "X-Title": "Stock Bot",
-            },
-            json={
-                "models": [
-                    "google/gemini-2.0-flash-exp:free",
-                    "meta-llama/llama-3.3-70b-instruct:free",
-                    "mistralai/mistral-7b-instruct:free",
-                ],
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 300,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        result  = resp.json()
-        content = result["choices"][0]["message"]["content"].strip()
-        # 불필요한 마크다운/특수문자 정제
-        content = content.replace("```", "").replace("**", "").strip()
-        return content
-    except Exception as e:
-        logging.error(f"AI 분석 실패 [{stock['name']}]: {e}")
-        print(f"  ❌ AI 분석 실패 [{stock['name']}]: {e}")
-        return ""
+    
     
 def get_investor_sentiment(code: str) -> dict:
     try:
