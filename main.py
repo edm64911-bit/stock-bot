@@ -267,17 +267,62 @@ MACD: {stock.get('macd_cross','?')}
 
 
 def get_investor_sentiment(code: str) -> dict:
+    """
+    네이버 금융 investor API로 3일 외국인/기관 순매수 조회.
+    실패 시 0으로 fallback (점수 영향 없음).
+    """
     try:
-        from pykrx import stock
-        end   = (TODAY - timedelta(days=1)).strftime("%Y%m%d")
-        start = (TODAY - timedelta(days=10)).strftime("%Y%m%d")
-        df    = stock.get_market_net_purchases_of_equities_investors(start, end, [code])
-        if df is None or df.empty:
+        url = (
+            f"https://fchart.stock.naver.com/siseJson.nhn"
+            f"?symbol={code}&requestType=1&startTime=&count=5&timeframe=day"
+        )
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=5)
+        # naver investor 별도 엔드포인트
+        inv_url = (
+            f"https://finance.naver.com/item/frgn.naver?code={code}"
+        )
+        inv_resp = requests.get(inv_url, headers=headers, timeout=5)
+        inv_resp.raise_for_status()
+
+        # pandas로 테이블 파싱
+        tables = pd.read_html(inv_resp.text, encoding="euc-kr")
+        if not tables:
             return {"foreign": 0, "institution": 0}
-        return {
-            "foreign":     int(df["외국인합계"].iloc[-3:].sum()) if "외국인합계" in df.columns else 0,
-            "institution": int(df["기관합계"].iloc[-3:].sum())   if "기관합계"   in df.columns else 0,
-        }
+
+        df = tables[0]
+        # 컬럼 구조: 날짜 | 종가 | ... | 외국인 순매수 | 기관 순매수
+        # 컬럼명이 다를 수 있어 위치 기반으로 접근
+        if df.shape[1] < 6:
+            return {"foreign": 0, "institution": 0}
+
+        # 최근 3행
+        recent = df.head(3)
+
+        def to_int_sum(col_data):
+            total = 0
+            for v in col_data:
+                try:
+                    total += int(str(v).replace(",", "").replace("+", "").strip())
+                except Exception:
+                    pass
+            return total
+
+        # 외국인 순매수: 컬럼 인덱스 탐색
+        foreign_col = None
+        institution_col = None
+        for col in df.columns:
+            col_str = str(col).replace(" ", "")
+            if "외국인" in col_str and "순매수" in col_str:
+                foreign_col = col
+            if "기관" in col_str and "순매수" in col_str:
+                institution_col = col
+
+        foreign     = to_int_sum(recent[foreign_col])     if foreign_col     is not None else 0
+        institution = to_int_sum(recent[institution_col]) if institution_col is not None else 0
+
+        return {"foreign": foreign, "institution": institution}
+
     except Exception:
         return {"foreign": 0, "institution": 0}
 
@@ -612,8 +657,25 @@ def save_results(results: list) -> None:
     try:
         clean = sanitize_for_json(results)
         with open(filename, "w", encoding="utf-8") as f:
-            json.dump(clean, f, ensure_ascii=False, indent=2)
+            json.dump(clean, f, ensure_ascii=False, indent=2, allow_nan=False)
         print(f"\n  💾 결과 저장: {filename}")
+    except ValueError as e:
+        # allow_nan=False 시 NaN/Inf 있으면 ValueError 발생 → 추가 정제
+        import math
+        def deep_clean(obj):
+            if isinstance(obj, float):
+                if math.isnan(obj) or math.isinf(obj):
+                    return 0.0
+                return obj
+            if isinstance(obj, dict):
+                return {k: deep_clean(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [deep_clean(v) for v in obj]
+            return obj
+        clean = deep_clean(results)
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(clean, f, ensure_ascii=False, indent=2, allow_nan=False)
+        print(f"\n  💾 결과 저장 (정제 후): {filename}")
     except Exception as e:
         logging.error(f"결과 저장 실패: {e}")
 

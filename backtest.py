@@ -50,8 +50,13 @@ def load_all_scans() -> list:
 
     for f in files:
         try:
+            import re as _re
             with open(f, "r", encoding="utf-8") as fp:
-                data = json.load(fp)
+                raw = fp.read()
+            raw  = _re.sub(r':\s*NaN',       ': null', raw)
+            raw  = _re.sub(r':\s*Infinity',  ': null', raw)
+            raw  = _re.sub(r':\s*-Infinity', ': null', raw)
+            data = json.loads(raw)
 
             date_str = f.replace("scan_", "").replace(".json", "")
             try:
