@@ -404,7 +404,54 @@ def analyze_coin(market: str, ticker: dict) -> dict | None:
     except Exception as e:
         logging.error(f"코인 분석 실패 [{market}]: {e}")
         return None
+    
+# ==================================================
+# OpenRouter AI 분석
+# ==================================================
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
+def get_ai_analysis(coin: dict) -> str:
+    if not OPENROUTER_API_KEY:
+        return ""
+    try:
+        prompt = f"""당신은 암호화폐 트레이딩 전문가입니다.
+아래 코인 데이터를 보고 매수/관망/비추천 중 하나로 판단하고 이유를 2-3줄로 설명해주세요.
+
+종목: {coin['code']}/KRW
+당일 변동: {coin['change_pct']}%
+거래대금: {coin['trade_value_억']}억
+4시간봉 RSI: {coin['rsi_4h']}
+1시간봉 RSI: {coin['rsi_1h']}
+15분봉 RSI: {coin['rsi_15m']}
+MA20: {'위' if coin['above_ma_4h'] else '아래'}
+타임프레임 일치: {coin['tf_bullish']}/3
+1시간봉 거래량: {coin['vol_ratio_1h']}배
+15분봉 거래량: {coin['vol_ratio_15m']}배
+고점 근접: {coin['near_high']}
+눌림 패턴: {coin['pullback']}
+펌핑 의심: {coin['pump_warning']}
+
+한국어로 3줄 이내로 답변하세요."""
+
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "google/gemini-2.0-flash-exp:free",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 300,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logging.error(f"AI 분석 실패 [{coin['code']}]: {e}")
+        return ""
+    
 def generate_verdict(coin: dict) -> dict:
     score   = coin["score"]
     reasons = []
@@ -478,6 +525,9 @@ def format_coin_message(coin: dict, rank: int, market_status: dict) -> str:
     if risks:
         msg += "\n\n⚠️ 리스크\n"
         msg += "\n".join(f"  • {r}" for r in risks)
+
+    if coin.get("ai_analysis"):
+        msg += f"\n\n🤖 AI 분석\n  {coin['ai_analysis']}"
 
     return msg
 
@@ -560,10 +610,11 @@ def main() -> None:
         return
 
     for coin in top_results:
-        verdict_info    = generate_verdict(coin)
-        coin["verdict"] = verdict_info["verdict"]
-        coin["reasons"] = verdict_info["reasons"]
-        coin["risks"]   = verdict_info["risks"]
+        verdict_info      = generate_verdict(coin)
+        coin["verdict"]   = verdict_info["verdict"]
+        coin["reasons"]   = verdict_info["reasons"]
+        coin["risks"]     = verdict_info["risks"]
+        coin["ai_analysis"] = get_ai_analysis(coin)
 
     sent_count = 0
     for rank, coin in enumerate(top_results, start=1):
