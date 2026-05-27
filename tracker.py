@@ -22,8 +22,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 GEMINI_MODELS = [
     "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
-    "gemini-2.5-pro",
 ]
 
 def get_pullback_ai(name: str, code: str, entry_price: int, cur_close: float,
@@ -61,7 +61,7 @@ MA5: {ma5:,.0f}원
 [이유] 2줄 이내로"""}]
                     }]
                 },
-                timeout=15,
+                timeout=30,
             )
             if resp.status_code == 429:
                 continue
