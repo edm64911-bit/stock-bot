@@ -215,25 +215,35 @@ def get_ai_analysis(stock: dict) -> str:
                 headers={"Content-Type": "application/json"},
                 json={
                     "contents": [{
-                        "parts": [{"text": f"""당신은 주식 트레이딩 전문가입니다.
-아래 종목 데이터를 보고 매수/관망/비추천 중 하나로 판단하고 이유를 2-3줄로 설명해주세요.
+                        "parts": [{"text": f"""당신은 세계 최고 수준의 퀀트 트레이더이자 단타/스윙 전략 분석가입니다.
+기대값(EV)이 높은 자리인지 판단하고, 실패 확률이 높은 패턴을 제거하며, 실제로 돈이 들어오는 차트를 구분하세요.
+감정이 아니라 데이터와 확률 기반으로 판단하세요.
 
-종목: {stock['name']} ({stock['code']})
-당일 상승률: {stock['change']}%
-5일 상승률: {stock['five_day_change']}%
-거래량: {stock['volume_ratio']}배
-RSI: {stock['rsi']}
-상대강도: {stock['relative_strength']}%
-거래대금: {stock['trading_value']}억
-캔들: {stock['candle']}
-MA20: {'위' if stock['above_ma20'] else '아래'}
-52주 신고가 근접: {stock['near_52w_high']}
-외국인 3일: {stock['foreign_net']:+,}주
-기관 3일: {stock['institution_net']:+,}주
+[종목 데이터]
+종목: {stock['name']} ({stock['code']}) / {stock.get('group','')}주
+당일: 시가 {stock.get('open_price',0):,}원 / 고가 {stock.get('high_price',0):,}원 / 저가 {stock.get('low_price',0):,}원 / 종가 {stock['entry_price']:,}원
+당일 상승률: {stock['change']}% / 5일 상승률: {stock['five_day_change']}%
+거래량: {stock['volume_ratio']}배 / 거래대금: {stock['trading_value']}억
+캔들: {stock['candle']} / 몸통비율: {stock.get('body_ratio',0)}% / 윗꼬리: {stock.get('upper_tail',0)}% / 종가위치: {stock.get('close_pos',0)}%
+RSI: {stock['rsi']} / 상대강도: {stock['relative_strength']}%
+MA5: {stock.get('ma5',0):,}원 / MA20: {'위' if stock['above_ma20'] else '아래'} / MA60: {stock.get('ma60',0):,}원
+이평선 정렬: {stock.get('ma_align','?')}
+볼린저밴드: 상단 {stock.get('bb_upper',0):,}원 / 하단 {stock.get('bb_lower',0):,}원 / 위치: {stock.get('bb_pos','?')}
+MACD: {stock.get('macd_cross','?')}
+52주 신고가 근접: {stock['near_52w_high']} / 눌림패턴: {stock['vol_consolidation']}
+외국인 3일: {stock['foreign_net']:+,}주 / 기관 3일: {stock['institution_net']:+,}주
 테마: {', '.join(stock['themes']) if stock['themes'] else '없음'}
-최근 뉴스: {' / '.join(stock['news'][:2]) if stock['news'] else '없음'}
+뉴스: {' / '.join(stock['news'][:2]) if stock['news'] else '없음'}
 
-한국어로 3줄 이내로 답변하세요."""}]
+[출력 형식 - 반드시 이 형식으로]
+[퀀트 점수] 0~100
+[기대값] 높음/보통/낮음
+[차트 위치] 돌파 초입/첫 눌림/과열/고점 분배 가능성/애매
+[수급 분석] 매집/분배 가능성, 거래량 질 평가
+[강한 요소] 핵심 3가지
+[위험 요소] 핵심 3가지
+[최종 판단] 적극 매수 가능/눌림 후 매수/돌파 확인 필요/관망/추격 금지
+[한줄 결론] 냉정하게 한줄 요약"""}]
                     }]
                 },
                 timeout=15,
@@ -455,6 +465,32 @@ def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) 
 
         near_52w_high     = is_near_52w_high(data)
         vol_consolidation = check_volume_consolidation(data)
+
+        # 추가 지표
+        ma60       = float(data["Close"].tail(60).mean()) if len(data) >= 60 else 0
+        ma5        = float(data["Close"].tail(5).mean())
+        bb_std     = float(data["Close"].tail(20).std())
+        bb_upper   = round(ma20 + bb_std * 2, 0)
+        bb_lower   = round(ma20 - bb_std * 2, 0)
+        bb_pos     = "상단 근접" if today_close >= bb_upper * 0.98 else "하단 근접" if today_close <= bb_lower * 1.02 else "중간"
+        ema12      = data["Close"].ewm(span=12).mean()
+        ema26      = data["Close"].ewm(span=26).mean()
+        macd_line  = ema12 - ema26
+        signal     = macd_line.ewm(span=9).mean()
+        macd_val   = float(macd_line.iloc[-1])
+        signal_val = float(signal.iloc[-1])
+        macd_cross = "골든크로스" if macd_val > signal_val and float(macd_line.iloc[-2]) <= float(signal.iloc[-2]) else \
+                     "데드크로스" if macd_val < signal_val and float(macd_line.iloc[-2]) >= float(signal.iloc[-2]) else \
+                     "상승중" if macd_val > signal_val else "하락중"
+        today_row  = data.iloc[-1]
+        open_p     = float(today_row["Open"])
+        high_p     = float(today_row["High"])
+        low_p      = float(today_row["Low"])
+        close_p    = float(today_row["Close"])
+        body_ratio = round(abs(close_p - open_p) / (high_p - low_p) * 100, 1) if high_p != low_p else 0
+        upper_tail = round((high_p - max(close_p, open_p)) / (high_p - low_p) * 100, 1) if high_p != low_p else 0
+        close_pos  = round((close_p - low_p) / (high_p - low_p) * 100, 1) if high_p != low_p else 50
+        ma_align   = "정배열" if ma5 > ma20 > ma60 and ma60 > 0 else "역배열" if ma5 < ma20 < ma60 and ma60 > 0 else "혼조"
         relative_strength = get_relative_strength(five_day_change, kospi_data)
         investor          = get_investor_sentiment(code)
         news_titles, detected_themes = analyze_news(name)
@@ -534,6 +570,19 @@ def analyze_stock(row, kospi_data, etf_cache, group_cfg: dict, group_name: str) 
             "target_price_1":    target_price_1,
             "target_price_2":    target_price_2,
             "scanned_at":        TODAY.strftime("%Y-%m-%d %H:%M:%S"),
+            "ma5":               round(ma5, 0),
+            "ma60":              round(ma60, 0),
+            "bb_upper":          bb_upper,
+            "bb_lower":          bb_lower,
+            "bb_pos":            bb_pos,
+            "macd_cross":        macd_cross,
+            "body_ratio":        body_ratio,
+            "upper_tail":        upper_tail,
+            "close_pos":         close_pos,
+            "ma_align":          ma_align,
+            "open_price":        int(open_p),
+            "high_price":        int(high_p),
+            "low_price":         int(low_p),
         }
 
     except Exception as e:
