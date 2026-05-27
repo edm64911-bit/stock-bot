@@ -512,6 +512,13 @@ def format_coin_message(coin: dict, rank: int, market_status: dict) -> str:
         f"\n\n"
         f"💎 종목: {coin['code']}/KRW\n"
         f"⭐ 점수: {coin['score']}점  {verdict}\n\n"
+    )
+
+    if coin.get("ai_analysis"):
+        msg += f"🤖 AI 분석\n  {coin['ai_analysis']}\n\n"
+
+    msg += (
+        f"💡 핵심: 거래량(1h) {coin['vol_ratio_1h']}배 · RSI {coin['rsi_4h']} · 당일 {coin['change_pct']:+.1f}% · TF {coin['tf_bullish']}/3\n\n"
         f"📈 타임프레임  {tf_bar}\n"
         f"  4시간봉: {'MA20 위 ✅' if coin['above_ma_4h'] else 'MA20 아래 ❌'}  RSI {coin['rsi_4h']}  거래량 {coin['vol_ratio_4h']}배\n"
         f"  1시간봉: 거래량 {coin['vol_ratio_1h']}배  RSI {coin['rsi_1h']}\n"
@@ -535,8 +542,7 @@ def format_coin_message(coin: dict, rank: int, market_status: dict) -> str:
         msg += "\n\n⚠️ 리스크\n"
         msg += "\n".join(f"  • {r}" for r in risks)
 
-    if coin.get("ai_analysis"):
-        msg += f"\n\n🤖 AI 분석\n  {coin['ai_analysis']}"
+    msg += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     return msg
 

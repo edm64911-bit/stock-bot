@@ -638,6 +638,15 @@ def format_discord_message(stock: dict, rank: int) -> str:
         f"🔥 종목: {stock['name']} ({stock['code']})  {group_emoji}{stock.get('group','')}주"
         + (f"  {warn_line}" if warn_line else "") +
         f"\n⭐ 점수: {stock['score']}점  {verdict}\n\n"
+    )
+
+    if stock.get("ai_analysis"):
+        msg += f"🤖 AI 분석\n  {stock['ai_analysis']}\n\n"
+
+    msg += (
+        f"💡 핵심: 거래량 {stock['volume_ratio']}배 · RSI {stock['rsi']} · 당일 {stock['change']:+.1f}% · 5일 {stock['five_day_change']:+.1f}%"
+        + (f" · {'/'.join(stock['themes'])} 테마" if stock['themes'] else "") +
+        f"\n\n"
         f"{candle_emoji}\n"
         f"{flags}\n\n"
         f"📈 당일 상승률:  {stock['change']}%\n"
@@ -670,8 +679,7 @@ def format_discord_message(stock: dict, rank: int) -> str:
     if stock["news"]:
         msg += "\n\n📰 뉴스\n" + "\n".join(f"  • {n}" for n in stock["news"])
 
-    if stock.get("ai_analysis"):
-        msg += f"\n\n🤖 AI 분석\n  {stock['ai_analysis']}"
+    msg += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     return msg
 
