@@ -17,7 +17,62 @@ import FinanceDataReader as fdr
 
 from datetime import datetime, timedelta
 
-WEBHOOK_STOCK = os.getenv("WEBHOOK_STOCK", "")
+WEBHOOK_STOCK  = os.getenv("WEBHOOK_STOCK", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+GEMINI_MODELS = [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+]
+
+def get_pullback_ai(name: str, code: str, entry_price: int, cur_close: float,
+                    vol_ratio: float, fib_382: float, fib_618: float,
+                    ma5: float, days_after: int, cond_count: int) -> str:
+    if not GEMINI_API_KEY:
+        return ""
+    for model in GEMINI_MODELS:
+        try:
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{
+                        "parts": [{"text": f"""당신은 퀀트 트레이더입니다.
+아래 데이터를 보고 이 종목이 진입 가능한 눌림목인지 판단하세요.
+
+종목: {name} ({code})
+급등가: {entry_price:,}원
+현재가: {cur_close:,}원 ({((cur_close-entry_price)/entry_price*100):+.1f}%)
+급등 후 경과일: {days_after}일
+거래량 비율 (급등일 대비): {vol_ratio*100:.0f}%
+피보나치 구간: {fib_618:,.0f}~{fib_382:,.0f}원
+MA5: {ma5:,.0f}원
+조건 충족: {cond_count}/4
+
+판단 기준:
+- 거래량이 충분히 줄었는가 (50% 이하)
+- 가격이 피보나치 눌림 구간에 있는가
+- MA5 지지를 받고 있는가
+- 급등 후 적정 시간이 지났는가
+
+반드시 아래 형식으로만 답하세요:
+[눌림 판단] 진입 가능 / 아직 이름 / 눌림 아님
+[이유] 2줄 이내로"""}]
+                    }]
+                },
+                timeout=15,
+            )
+            if resp.status_code == 429:
+                continue
+            resp.raise_for_status()
+            content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            content = content.replace("```", "").replace("**", "").strip()
+            return content
+        except Exception as e:
+            logging.error(f"눌림 AI 실패 [{name}]: {e}")
+            continue
+    return ""
 POSITION_FILE = "positions.json"
 
 LOG_FILE = f"tracker_{datetime.now().strftime('%Y%m%d')}.log"
@@ -131,6 +186,95 @@ def check_position(pos: dict) -> dict:
     return updated
 
 # ==================================================
+# 눌림 감지
+# ==================================================
+def check_pullback(pos: dict) -> None:
+    code        = pos["code"]
+    name        = pos["name"]
+    entry_price = pos["entry_price"]
+
+    try:
+        today = datetime.today()
+        start = (today - timedelta(days=10)).strftime("%Y-%m-%d")
+        data  = fdr.DataReader(code, start)
+        data  = data.dropna()
+
+        if len(data) < 3:
+            return
+
+        # 급등일 찾기 (entry_price 기준 ±3%)
+        entry_row = None
+        for i in range(len(data)):
+            if abs(float(data["Close"].iloc[i]) - entry_price) / entry_price < 0.03:
+                entry_row = i
+                break
+
+        if entry_row is None:
+            return
+
+        # 이미 급등일이면 스킵
+        if entry_row == len(data) - 1:
+            return
+
+        surge_vol      = float(data["Volume"].iloc[entry_row])
+        surge_body_low = min(float(data["Open"].iloc[entry_row]), float(data["Close"].iloc[entry_row]))
+        cur_close      = float(data["Close"].iloc[-1])
+        cur_vol        = float(data["Volume"].iloc[-1])
+        days_after     = len(data) - 1 - entry_row
+
+        # 눌림 조건
+        vol_ratio  = cur_vol / surge_vol if surge_vol > 0 else 1
+        vol_ok     = vol_ratio <= 0.5
+
+        fib_382    = entry_price - (entry_price - surge_body_low) * 0.382
+        fib_618    = entry_price - (entry_price - surge_body_low) * 0.618
+        price_ok   = fib_618 <= cur_close <= fib_382
+
+        ma5        = float(data["Close"].tail(5).mean()) if len(data) >= 5 else cur_close
+        ma5_ok     = abs(cur_close - ma5) / ma5 <= 0.03
+
+        candles_ok = days_after >= 1
+
+        cond_count = sum([vol_ok, price_ok, ma5_ok, candles_ok])
+
+        if cond_count >= 3:
+            # AI 눌림 판단
+            ai_result = get_pullback_ai(
+                name, code, entry_price, cur_close,
+                vol_ratio, fib_382, fib_618, ma5, days_after, cond_count
+            )
+
+            if "진입 가능" not in ai_result:
+                print(f"  ⏭ AI 눌림 아님: {name} → {ai_result[:40]}")
+                return
+
+            pnl_pct  = round((cur_close - entry_price) / entry_price * 100, 2)
+            cond_str = "\n".join(filter(None, [
+                f"  ✅ 거래량 급등일 대비 {vol_ratio*100:.0f}% (50% 이하)" if vol_ok    else f"  ❌ 거래량 {vol_ratio*100:.0f}% (아직 높음)",
+                f"  ✅ 피보나치 구간 ({fib_618:,.0f}~{fib_382:,.0f}원)"    if price_ok  else f"  ❌ 피보나치 구간 벗어남",
+                f"  ✅ MA5 근접 ({ma5:,.0f}원)"                             if ma5_ok    else f"  ❌ MA5 거리 있음",
+                f"  ✅ 급등 후 {days_after}일 경과"                          if candles_ok else "",
+            ]))
+
+            msg = (
+                f"📌 눌림 진입 가능\n\n"
+                f"종목: {name} ({code})\n"
+                f"급등가:  {entry_price:,}원\n"
+                f"현재가:  {cur_close:,}원  ({pnl_pct:+.1f}%)\n\n"
+                f"🤖 AI 판단\n  {ai_result}\n\n"
+                f"조건 충족 {cond_count}/4\n"
+                f"{cond_str}\n\n"
+                f"🎯 진입 구간: {fib_618:,.0f}~{fib_382:,.0f}원\n"
+                f"🛑 손절가: {pos['stop_loss']:,}원"
+            )
+            print(f"  📌 눌림 진입 가능: {name} ({cur_close:,}원)")
+            send_discord_message(msg)
+
+    except Exception as e:
+        logging.error(f"눌림 감지 실패 [{code}]: {e}")
+
+
+# ==================================================
 # 오래된 포지션 정리 (30일 이상 미결)
 # ==================================================
 def cleanup_old_positions(positions: list) -> list:
@@ -175,6 +319,11 @@ def main() -> None:
         return
 
     updated_active = [check_position(pos) for pos in active]
+
+    print("\n  📌 눌림 감지 체크 중...\n")
+    for pos in active:
+        if pos["status"] == "진행중":
+            check_pullback(pos)
     all_positions  = cleanup_old_positions(updated_active + done)
 
     with open(POSITION_FILE, "w", encoding="utf-8") as f:
