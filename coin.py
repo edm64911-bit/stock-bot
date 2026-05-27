@@ -427,24 +427,28 @@ def get_ai_analysis(coin: dict) -> str:
                 headers={"Content-Type": "application/json"},
                 json={
                     "contents": [{
-                        "parts": [{"text": f"""당신은 암호화폐 트레이딩 전문가입니다.
-아래 코인 데이터를 보고 매수/관망/비추천 중 하나로 판단하고 이유를 2-3줄로 설명해주세요.
+                        "parts": [{"text": f"""당신은 세계 최고 수준의 퀀트 트레이더이자 암호화폐 단타/스윙 전략 분석가입니다.
+기대값(EV)이 높은 자리인지 판단하고, 실패 확률이 높은 패턴을 제거하며, 실제로 돈이 들어오는 차트를 구분하세요.
+감정이 아니라 데이터와 확률 기반으로 판단하세요.
 
+[코인 데이터]
 종목: {coin['code']}/KRW
-당일 변동: {coin['change_pct']}%
-거래대금: {coin['trade_value_억']}억
-4시간봉 RSI: {coin['rsi_4h']}
-1시간봉 RSI: {coin['rsi_1h']}
-15분봉 RSI: {coin['rsi_15m']}
-MA20: {'위' if coin['above_ma_4h'] else '아래'}
+당일 변동: {coin['change_pct']}% / 거래대금: {coin['trade_value_억']}억
+4시간봉: MA20 {'위' if coin['above_ma_4h'] else '아래'} / RSI {coin['rsi_4h']} / 거래량 {coin['vol_ratio_4h']}배
+1시간봉: RSI {coin['rsi_1h']} / 거래량 {coin['vol_ratio_1h']}배
+15분봉: {'양봉' if coin['bullish_15m'] else '음봉'} / RSI {coin['rsi_15m']} / 거래량 {coin['vol_ratio_15m']}배
 타임프레임 일치: {coin['tf_bullish']}/3
-1시간봉 거래량: {coin['vol_ratio_1h']}배
-15분봉 거래량: {coin['vol_ratio_15m']}배
-고점 근접: {coin['near_high']}
-눌림 패턴: {coin['pullback']}
-펌핑 의심: {coin['pump_warning']}
+고점 근접: {coin['near_high']} / 눌림패턴: {coin['pullback']} / 펌핑의심: {coin['pump_warning']}
 
-한국어로 3줄 이내로 답변하세요."""}]
+[출력 형식 - 반드시 이 형식으로]
+[퀀트 점수] 0~100
+[기대값] 높음/보통/낮음
+[차트 위치] 돌파 초입/첫 눌림/과열/고점 분배 가능성/애매
+[수급 분석] 매집/분배 가능성, 거래량 질 평가
+[강한 요소] 핵심 3가지
+[위험 요소] 핵심 3가지
+[최종 판단] 적극 매수 가능/눌림 후 매수/돌파 확인 필요/관망/추격 금지
+[한줄 결론] 냉정하게 한줄 요약"""}]
                     }]
                 },
                 timeout=15,
