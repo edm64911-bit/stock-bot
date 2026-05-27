@@ -542,7 +542,7 @@ def format_coin_message(coin: dict, rank: int, market_status: dict) -> str:
 # ==================================================
 def main() -> None:
     start_time = time.time()
-    now        = datetime.now()
+    now = datetime.utcnow() + timedelta(hours=9)  # KST 변환
     print("=" * 50)
     print(f"🪙 코인 수급 탐지 스캐너 v1.1")
     print(f"   실행 시각: {now.strftime('%Y-%m-%d %H:%M:%S')} KST")
