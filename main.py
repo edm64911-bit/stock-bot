@@ -280,6 +280,23 @@ MACD: {stock.get('macd_cross','?')}
 def get_investor_sentiment(code: str, investor_cache: dict) -> dict:
     return investor_cache.get(code, {"foreign": 0, "institution": 0})
 
+def get_today_ohlcv(code: str) -> dict | None:
+    """장중 실행 시 당일 실시간 OHLCV를 pykrx에서 가져옴"""
+        from pykrx import stock as krx
+        today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
+        df = krx.get_market_ohlcv(today_str, today_str, code)
+        if df is None or df.empty:
+            print(f"  ⚠️ pykrx 당일 데이터 없음 [{code}] ({today_str})")
+            return None
+        row = df.iloc[-1]
+        o, h, l, c, v = float(row["시가"]), float(row["고가"]), float(row["저가"]), float(row["종가"]), float(row["거래량"])
+        if c <= 0 or v <= 0:
+            return None
+        return {"open": o, "high": h, "low": l, "close": c, "volume": v}
+    except Exception as e:
+        logging.error(f"get_today_ohlcv [{code}]: {e}")
+        return None
+
 def load_investor_cache() -> dict:
     try:
         from pykrx import stock
@@ -446,7 +463,15 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         if len(data) < 30:
             return None
 
-        today_close     = float(data["Close"].iloc[-1])
+        # 당일 실시간 OHLCV (pykrx) — 없으면 fdr 전일 데이터로 fallback
+        today_ohlcv     = get_today_ohlcv(code)
+        if today_ohlcv:
+            today_close = today_ohlcv["close"]
+            today_vol   = today_ohlcv["volume"]
+        else:
+            today_close = float(data["Close"].iloc[-1])
+            today_vol   = float(data["Volume"].iloc[-1])
+
         yesterday_close = float(data["Close"].iloc[-2])
         if today_close <= 0 or yesterday_close <= 0:
             return None
@@ -458,7 +483,7 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
             pass  # 점수로 처리
 
         avg_volume   = data["Volume"].iloc[-11:-1].mean()
-        today_volume = float(data["Volume"].iloc[-1])
+        today_volume = today_vol  # pykrx 당일 or fdr fallback
         if avg_volume <= 0:
             return None
 
@@ -475,7 +500,14 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         ma20       = float(data["Close"].tail(20).mean())
         above_ma20 = today_close >= ma20
         today_atr  = calculate_atr(data)
-        candle     = check_candle_pattern(data)
+        if today_ohlcv:
+            _tmp = pd.DataFrame([{
+                "Open": today_ohlcv["open"], "High": today_ohlcv["high"],
+                "Low":  today_ohlcv["low"],  "Close": today_ohlcv["close"],
+            }])
+            candle = check_candle_pattern(_tmp)
+        else:
+            candle = check_candle_pattern(data)
 
         entry_price    = int(today_close)
         stop_loss      = int(today_close - today_atr)
@@ -509,11 +541,14 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         macd_cross = "골든크로스" if macd_val > signal_val and float(macd_line.iloc[-2]) <= float(signal.iloc[-2]) else \
                      "데드크로스" if macd_val < signal_val and float(macd_line.iloc[-2]) >= float(signal.iloc[-2]) else \
                      "상승중" if macd_val > signal_val else "하락중"
-        today_row  = data.iloc[-1]
-        open_p     = float(today_row["Open"])
-        high_p     = float(today_row["High"])
-        low_p      = float(today_row["Low"])
-        close_p    = float(today_row["Close"])
+        if today_ohlcv:
+            open_p, high_p, low_p, close_p = today_ohlcv["open"], today_ohlcv["high"], today_ohlcv["low"], today_ohlcv["close"]
+        else:
+            today_row  = data.iloc[-1]
+            open_p     = float(today_row["Open"])
+            high_p     = float(today_row["High"])
+            low_p      = float(today_row["Low"])
+            close_p    = float(today_row["Close"])
         body_ratio = round(abs(close_p - open_p) / (high_p - low_p) * 100, 1) if high_p != low_p else 0
         upper_tail = round((high_p - max(close_p, open_p)) / (high_p - low_p) * 100, 1) if high_p != low_p else 0
         close_pos  = round((close_p - low_p) / (high_p - low_p) * 100, 1) if high_p != low_p else 50
