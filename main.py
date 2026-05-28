@@ -282,6 +282,7 @@ def get_investor_sentiment(code: str, investor_cache: dict) -> dict:
 
 def get_today_ohlcv(code: str) -> dict | None:
     """장중 실행 시 당일 실시간 OHLCV를 pykrx에서 가져옴"""
+    try:
         from pykrx import stock as krx
         today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
         df = krx.get_market_ohlcv(today_str, today_str, code)
