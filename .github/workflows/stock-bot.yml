@@ -23,6 +23,8 @@ jobs:
           WEBHOOK_STOCK_WEEKLY: ${{ secrets.WEBHOOK_STOCK_WEEKLY }}
           OPENROUTER_API_KEY:   ${{ secrets.OPENROUTER_API_KEY }}
           GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
+          KRX_ID:               ${{ secrets.KRX_ID }}
+          KRX_PW:               ${{ secrets.KRX_PW }}
         run: python main.py
       - name: 코인 스캐너 실행
         env:
@@ -34,6 +36,8 @@ jobs:
         env:
           WEBHOOK_STOCK:  ${{ secrets.WEBHOOK_STOCK }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          KRX_ID:         ${{ secrets.KRX_ID }}
+          KRX_PW:         ${{ secrets.KRX_PW }}
         run: python tracker.py
       - name: 백테스트 실행
         env:
