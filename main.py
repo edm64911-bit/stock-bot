@@ -690,6 +690,8 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         return None
 
 def sanitize_for_json(obj):
+    if isinstance(obj, bool):
+        return obj  # bool은 int보다 먼저 체크해야 함
     if isinstance(obj, float):
         if obj != obj or obj == float('inf') or obj == float('-inf'):
             return None
