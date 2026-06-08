@@ -365,6 +365,8 @@ def main() -> None:
     # --------------------------------------------------
     # 3. 눌림 조건 체크 → 신규 진입
     # --------------------------------------------------
+    # positions 최신 상태 reload 후 슬롯 계산
+    positions     = load_json(POSITION_FILE, [])
     active_now    = [p for p in positions if p["status"] in ["진행중", "1차도달"]]
     active_count  = len(active_now)
     slots         = max(0, MAX_POSITIONS - active_count)
