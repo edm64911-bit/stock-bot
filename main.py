@@ -725,6 +725,7 @@ def save_results(results: list) -> None:
         print(f"\n  💾 결과 저장 (정제 후): {filename}")
     except Exception as e:
         logging.error(f"결과 저장 실패: {e}")
+        print(f"  ❌ 결과 저장 실패: {e}")
 
 # ==================================================
 # watchlist.json 저장 (positions 직접 저장 제거)
