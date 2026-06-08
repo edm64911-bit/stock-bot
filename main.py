@@ -1,16 +1,21 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v3.1
-  변경사항:
-    - 시총 구간별 분석 (소형/중형/대형)
-    - 구간별 거래량 기준 차등 적용
-    - 우선주 필터 강화
-    - 기관 3일 하드코딩 버그 수정
-    - positions.json 중복 체크 수정 (진행중만)
-    - 눌림 패턴 로직 수정
-    - 거래량 표현 기준 조정
-    - 섹터 ETF 테마 없음 처리 개선
-    - is_market_open() KST 요일 버그 수정
+  초기 수급 탐지 스캐너 v4.1
+  변경사항 (v4.0 → v4.1):
+    - RR 계산/필터 제거 (WATCH 구조에서 의미 없음)
+    - stop_loss/target_price 계산 제거 (tracker에서 재계산)
+    - Discord 눌림 구간 3~10%로 수정
+    - 투자자 캐시 KOSPI+KOSDAQ 누적 합산 방식으로 수정
+  변경사항 (v3.1 → v4.0):
+    - 하드컷 필터 추가 (daily>=15%, RSI>=70, 5day>=20%)
+    - 과열 페널티 추가 (daily>=12% → score-=5)
+    - save_positions → save_watchlist 구조 변경
+    - watchlist.json 저장 (status=WATCH, 진입은 tracker로 분리)
+    - MAX_WATCH=20 초과 시 최저 score 제거
+    - 중복 종목 재스캔 시 score 업데이트, watch_price 유지
+    - 진입 메타데이터 저장 (entry_rsi, entry_daily_change 등)
+    - 수급 캐시 컬럼명 동적 탐지
+    - AI timeout 8초, 실패 시 즉시 skip
 ===================================================
 """
 
@@ -30,10 +35,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
 # ==================================================
+# 상수
+# ==================================================
+MAX_WATCH     = 20   # watchlist 최대 종목 수
+HARD_DAILY    = 15.0 # 당일 상승률 하드컷 (%)
+HARD_RSI      = 70.0 # RSI 하드컷
+HARD_5DAY     = 20.0 # 5일 상승률 하드컷 (%)
+PENALTY_DAILY = 12.0 # 당일 상승률 페널티 기준 (%)
+
+# ==================================================
 # 장 시간 체크 (KST 09:00 ~ 15:30 평일)
 # ==================================================
 def is_market_open() -> bool:
-    now      = datetime.utcnow() + timedelta(hours=9)  # KST 변환
+    now      = datetime.utcnow() + timedelta(hours=9)
     kst_time = now.hour * 100 + now.minute
     weekday  = now.weekday()
     if weekday >= 5:
@@ -194,7 +208,7 @@ def get_relative_strength(stock_5d: float, kospi_data) -> float:
     return round(stock_5d - kospi_5d, 2)
 
 # ==================================================
-# OpenRouter AI 분석
+# AI 분석
 # ==================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
@@ -279,13 +293,11 @@ def get_investor_sentiment(code: str, investor_cache: dict) -> dict:
     return investor_cache.get(code, {"foreign": 0, "institution": 0})
 
 def get_today_ohlcv(code: str) -> dict | None:
-    """장중 실행 시 당일 실시간 OHLCV를 pykrx에서 가져옴"""
     try:
         from pykrx import stock as krx
         today_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
         df = krx.get_market_ohlcv(today_str, today_str, code)
         if df is None or df.empty:
-            print(f"  ⚠️ pykrx 당일 데이터 없음 [{code}] ({today_str})")
             return None
         row = df.iloc[-1]
         o, h, l, c, v = float(row["시가"]), float(row["고가"]), float(row["저가"]), float(row["종가"]), float(row["거래량"])
@@ -316,10 +328,13 @@ def load_investor_cache() -> dict:
                 print(f"  ⚠️ [{market}] 수급 컬럼 없음. 실제 컬럼: {list(df.columns)}")
                 continue
             for ticker in df.index:
-                cache[ticker] = {
-                    "foreign":     int(df.loc[ticker, foreign_col]),
-                    "institution": int(df.loc[ticker, institution_col]),
-                }
+                f = int(df.loc[ticker, foreign_col])
+                i = int(df.loc[ticker, institution_col])
+                if ticker not in cache:
+                    cache[ticker] = {"foreign": f, "institution": i}
+                else:
+                    cache[ticker]["foreign"]     += f
+                    cache[ticker]["institution"] += i
         print(f"  수급 캐시 로딩 완료: {len(cache)}개 종목")
         return cache
     except Exception as e:
@@ -469,8 +484,7 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         if len(data) < 30:
             return None
 
-        # 당일 실시간 OHLCV (pykrx) — 없으면 fdr 전일 데이터로 fallback
-        today_ohlcv     = get_today_ohlcv(code)
+        today_ohlcv = get_today_ohlcv(code)
         if today_ohlcv:
             today_close = today_ohlcv["close"]
             today_vol   = today_ohlcv["volume"]
@@ -485,16 +499,18 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         change_pct      = (today_close - yesterday_close) / yesterday_close * 100
         five_day_change = (today_close - data["Close"].iloc[-5]) / data["Close"].iloc[-5] * 100
 
-        if five_day_change > 35:
-            pass  # 점수로 처리
+        # ==================================================
+        # 하드컷 (순서 중요: 페널티 전에 먼저 제거)
+        # ==================================================
+        if change_pct >= HARD_DAILY or five_day_change >= HARD_5DAY:
+            return None
 
         avg_volume   = data["Volume"].iloc[-11:-1].mean()
-        today_volume = today_vol  # pykrx 당일 or fdr fallback
         if avg_volume <= 0:
             return None
 
-        volume_ratio  = today_volume / avg_volume
-        trading_value = today_close * today_volume
+        volume_ratio  = today_vol / avg_volume
+        trading_value = today_close * today_vol
 
         if volume_ratio < group_cfg["vol_min"]:
             return None
@@ -503,9 +519,14 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
 
         today_rsi = calculate_rsi(data["Close"])
 
+        # RSI 하드컷
+        if today_rsi >= HARD_RSI:
+            return None
+
         ma20       = float(data["Close"].tail(20).mean())
         above_ma20 = today_close >= ma20
         today_atr  = calculate_atr(data)
+
         if today_ohlcv:
             _tmp = pd.DataFrame([{
                 "Open": today_ohlcv["open"], "High": today_ohlcv["high"],
@@ -515,23 +536,12 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         else:
             candle = check_candle_pattern(data)
 
-        entry_price    = int(today_close)
-        stop_loss      = int(today_close - today_atr)
-        target_price_1 = int(today_close + today_atr * 1.5)
-        target_price_2 = int(today_close + today_atr * 2.0)
-
-        risk   = entry_price - stop_loss
-        reward = target_price_2 - entry_price
-        if risk <= 0:
-            return None
-        rr_ratio = round(reward / risk, 2)
-        if rr_ratio < 2.0:
-            return None
+        entry_price = int(today_close)
+        # stop/tp는 tracker 진입 시점 ATR로 재계산 — 여기서 계산 불필요
 
         near_52w_high     = is_near_52w_high(data)
         vol_consolidation = check_volume_consolidation(data)
 
-        # 추가 지표
         ma60       = float(data["Close"].tail(60).mean()) if len(data) >= 60 else 0
         ma5        = float(data["Close"].tail(5).mean())
         bb_std     = float(data["Close"].tail(20).std())
@@ -547,75 +557,83 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         macd_cross = "골든크로스" if macd_val > signal_val and float(macd_line.iloc[-2]) <= float(signal.iloc[-2]) else \
                      "데드크로스" if macd_val < signal_val and float(macd_line.iloc[-2]) >= float(signal.iloc[-2]) else \
                      "상승중" if macd_val > signal_val else "하락중"
+
         if today_ohlcv:
             open_p, high_p, low_p, close_p = today_ohlcv["open"], today_ohlcv["high"], today_ohlcv["low"], today_ohlcv["close"]
         else:
-            today_row  = data.iloc[-1]
-            open_p     = float(today_row["Open"])
-            high_p     = float(today_row["High"])
-            low_p      = float(today_row["Low"])
-            close_p    = float(today_row["Close"])
+            today_row = data.iloc[-1]
+            open_p    = float(today_row["Open"])
+            high_p    = float(today_row["High"])
+            low_p     = float(today_row["Low"])
+            close_p   = float(today_row["Close"])
+
         body_ratio = round(abs(close_p - open_p) / (high_p - low_p) * 100, 1) if high_p != low_p else 0
         upper_tail = round((high_p - max(close_p, open_p)) / (high_p - low_p) * 100, 1) if high_p != low_p else 0
         close_pos  = round((close_p - low_p) / (high_p - low_p) * 100, 1) if high_p != low_p else 50
         ma_align   = "정배열" if ma5 > ma20 > ma60 and ma60 > 0 else "역배열" if ma5 < ma20 < ma60 and ma60 > 0 else "혼조"
-        relative_strength = get_relative_strength(five_day_change, kospi_data)
-        investor          = get_investor_sentiment(code, investor_cache)
-        news_titles, detected_themes = analyze_news(name)
-        sector_bullish    = is_sector_etf_bullish(detected_themes, etf_cache)
-        event_news        = has_event_news(news_titles)
 
+        relative_strength        = get_relative_strength(five_day_change, kospi_data)
+        investor                 = get_investor_sentiment(code, investor_cache)
+        news_titles, detected_themes = analyze_news(name)
+        sector_bullish           = is_sector_etf_bullish(detected_themes, etf_cache)
+        event_news               = has_event_news(news_titles)
+
+        # ==================================================
+        # 스코어링
+        # ==================================================
         score = 0
 
-        if five_day_change > 35:       score -= 4
-        elif five_day_change > 25:     score -= 2
+        # 과열 페널티 (하드컷 통과한 12~14.99% 구간)
+        if change_pct >= PENALTY_DAILY:
+            score -= 5
 
-        if volume_ratio > 3:           score += 5
-        elif volume_ratio > 2:         score += 3
-        elif volume_ratio > 1.5:       score += 1
+        if five_day_change > 35:   score -= 4
+        elif five_day_change > 25: score -= 2
 
-        if 0 < change_pct < 5:         score += 3
-        elif change_pct >= 5:          score += 1
+        if volume_ratio > 3:       score += 5
+        elif volume_ratio > 2:     score += 3
+        elif volume_ratio > 1.5:   score += 1
 
-        if today_rsi < 60:             score += 2
-        elif today_rsi < 65:           score += 1
-        elif today_rsi < 70:           score += 0
-        elif today_rsi < 75:           score -= 2
-        else:                          score -= 3
+        if 0 < change_pct < 5:     score += 3
+        elif change_pct >= 5:      score += 1
+
+        if today_rsi < 60:         score += 2
+        elif today_rsi < 65:       score += 1
+        elif today_rsi < 70:       score += 0
 
         if trading_value > 10_000_000_000:  score += 3
         elif trading_value > 5_000_000_000: score += 1
 
         score += len(detected_themes) * 2
 
-        if near_52w_high:              score += 3
-        if vol_consolidation:          score += 2
-        if above_ma20:                 score += 2
-        else:                          score -= 1
+        if near_52w_high:          score += 3
+        if vol_consolidation:      score += 2
+        if above_ma20:             score += 2
+        else:                      score -= 1
 
-        if relative_strength > 5:      score += 3
-        elif relative_strength > 2:    score += 1
+        if relative_strength > 5:  score += 3
+        elif relative_strength > 2:score += 1
 
         if investor["foreign"] > 0:    score += 3
         if investor["institution"] > 0:score += 2
 
         if sector_bullish is False:    score -= 3
 
-        if candle == "장대양봉":           score += 3
-        elif candle == "아랫꼬리양봉":     score += 2
-        elif candle == "윗꼬리음봉":       score -= 2
+        if candle == "장대양봉":       score += 3
+        elif candle == "아랫꼬리양봉": score += 2
+        elif candle == "윗꼬리음봉":   score -= 2
 
-        if close_pos >= 70:            score += 4
-        elif close_pos >= 50:          score += 2
-        elif close_pos < 30:           score -= 5
+        if close_pos >= 70:        score += 4
+        elif close_pos >= 50:      score += 2
+        elif close_pos < 30:       score -= 5
 
-        if upper_tail > 50:            score -= 4
-        elif upper_tail > 30:          score -= 2
+        if upper_tail > 50:        score -= 4
+        elif upper_tail > 30:      score -= 2
 
         if group_name == "소형" and volume_ratio >= 2.0:
             score += 2
 
-        if event_news:                 score -= 2
+        if event_news:             score -= 2
 
         if score < 3:
             return None
@@ -640,14 +658,10 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
             "institution_net":   investor["institution"],
             "sector_bullish":    sector_bullish,
             "candle":            candle,
-            "rr_ratio":          rr_ratio,
             "themes":            detected_themes,
             "news":              news_titles,
             "event_news":        event_news,
             "entry_price":       entry_price,
-            "stop_loss":         stop_loss,
-            "target_price_1":    target_price_1,
-            "target_price_2":    target_price_2,
             "scanned_at":        TODAY.strftime("%Y-%m-%d %H:%M:%S"),
             "ma5":               round(ma5, 0),
             "ma60":              round(ma60, 0),
@@ -662,6 +676,12 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
             "open_price":        int(open_p),
             "high_price":        int(high_p),
             "low_price":         int(low_p),
+            # 진입 메타데이터 (분석용)
+            "entry_rsi":          today_rsi,
+            "entry_daily_change": round(change_pct, 2),
+            "entry_5day_change":  round(five_day_change, 2),
+            "entry_atr":          round(today_atr, 0),
+            "entry_score":        score,
         }
 
     except Exception as e:
@@ -688,8 +708,7 @@ def save_results(results: list) -> None:
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(clean, f, ensure_ascii=False, indent=2, allow_nan=False)
         print(f"\n  💾 결과 저장: {filename}")
-    except ValueError as e:
-        # allow_nan=False 시 NaN/Inf 있으면 ValueError 발생 → 추가 정제
+    except ValueError:
         import math
         def deep_clean(obj):
             if isinstance(obj, float):
@@ -708,41 +727,72 @@ def save_results(results: list) -> None:
     except Exception as e:
         logging.error(f"결과 저장 실패: {e}")
 
-def save_positions(top_results: list) -> None:
-    filename = "positions.json"
+# ==================================================
+# watchlist.json 저장 (positions 직접 저장 제거)
+# ==================================================
+def save_watchlist(top_results: list) -> None:
+    filename = "watchlist.json"
     try:
         if os.path.exists(filename):
             with open(filename, "r", encoding="utf-8") as f:
-                positions = json.load(f)
+                watchlist = json.load(f)
         else:
-            positions = []
+            watchlist = []
 
-        existing_codes = {p["code"] for p in positions if p["status"] == "진행중"}
+        watch_map = {w["code"]: i for i, w in enumerate(watchlist)}
 
         for stock in top_results:
-            if stock["code"] in existing_codes:
-                continue
             if "비추천" in stock.get("verdict", ""):
                 continue
-            positions.append({
-                "code":           stock["code"],
-                "name":           stock["name"],
-                "group":          stock.get("group", ""),
-                "entry_price":    stock["entry_price"],
-                "stop_loss":      stock["stop_loss"],
-                "target_price_1": stock["target_price_1"],
-                "target_price_2": stock["target_price_2"],
-                "entered_at":     TODAY.strftime("%Y-%m-%d %H:%M:%S"),
-                "status":         "진행중",
-                "result":         None,
-                "verdict":        stock.get("verdict", ""),
-            })
+
+            code = stock["code"]
+
+            if code in watch_map:
+                # 중복: score 업데이트, watch_price 유지
+                idx = watch_map[code]
+                watchlist[idx]["score"]          = max(watchlist[idx]["score"], stock["score"])
+                watchlist[idx]["last_scan_date"] = TODAY.strftime("%Y-%m-%d")
+                watchlist[idx]["entry_rsi"]          = stock.get("entry_rsi", 0)
+                watchlist[idx]["entry_daily_change"]  = stock.get("entry_daily_change", 0)
+                watchlist[idx]["entry_5day_change"]   = stock.get("entry_5day_change", 0)
+                watchlist[idx]["entry_atr"]           = stock.get("entry_atr", 0)
+                watchlist[idx]["entry_score"]         = stock["score"]
+            else:
+                # 신규 등록
+                watchlist.append({
+                    "code":               code,
+                    "name":               stock["name"],
+                    "group":              stock.get("group", ""),
+                    "score":              stock["score"],
+                    "watch_price":        stock["entry_price"],   # 고정 — 절대 갱신 안 함
+                    "watch_date":         TODAY.strftime("%Y-%m-%d"),
+                    "last_scan_date":     TODAY.strftime("%Y-%m-%d"),
+                    "atr":                stock.get("entry_atr", 0),
+                    "verdict":            stock.get("verdict", ""),
+                    "status":             "WATCH",
+                    "below_ma20_streak":  0,
+                    # 진입 메타데이터
+                    "entry_rsi":          stock.get("entry_rsi", 0),
+                    "entry_daily_change": stock.get("entry_daily_change", 0),
+                    "entry_5day_change":  stock.get("entry_5day_change", 0),
+                    "entry_atr":          stock.get("entry_atr", 0),
+                    "entry_score":        stock["score"],
+                })
+
+        # MAX_WATCH 초과 시 최저 score 제거
+        if len(watchlist) > MAX_WATCH:
+            watchlist.sort(key=lambda x: x["score"], reverse=True)
+            removed = watchlist[MAX_WATCH:]
+            watchlist = watchlist[:MAX_WATCH]
+            for r in removed:
+                print(f"  🗑️ WATCH 제거 (score 낮음): {r['name']} ({r['score']}점)")
 
         with open(filename, "w", encoding="utf-8") as f:
-            json.dump(positions, f, ensure_ascii=False, indent=2)
-        print(f"  📌 포지션 저장: {filename} ({len(positions)}개)")
+            json.dump(watchlist, f, ensure_ascii=False, indent=2)
+        print(f"  📋 watchlist 저장: {filename} ({len(watchlist)}개)")
+
     except Exception as e:
-        logging.error(f"포지션 저장 실패: {e}")
+        logging.error(f"watchlist 저장 실패: {e}")
 
 def format_discord_message(stock: dict, rank: int) -> str:
     candle_emoji = {
@@ -775,11 +825,10 @@ def format_discord_message(stock: dict, rank: int) -> str:
     verdict = stock.get("verdict", "")
     reasons = stock.get("reasons", [])
     risks   = stock.get("risks", [])
-
     warn_line = "  ".join(filter(None, [event_warn, overheat_warn]))
 
     msg = (
-        f"🚨 수급 감지 #{rank}\n\n"
+        f"👀 WATCH 등록 #{rank}\n\n"
         f"🔥 종목: {stock['name']} ({stock['code']})  {group_emoji}{stock.get('group','')}주"
         + (f"  {warn_line}" if warn_line else "") +
         f"\n⭐ 점수: {stock['score']}점  {verdict}\n\n"
@@ -803,11 +852,9 @@ def format_discord_message(stock: dict, rank: int) -> str:
         f"👥 외국인 3일:   {stock['foreign_net']:+,}주\n"
         f"🏦 기관 3일:     {stock['institution_net']:+,}주\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 진입가:    {stock['entry_price']:,}원\n"
-        f"🚀 1차 목표:  {stock['target_price_1']:,}원  → 절반 청산 후 손절 본전으로\n"
-        f"🚀 2차 목표:  {stock['target_price_2']:,}원  → 나머지 전량 청산\n"
-        f"🛑 손절가:    {stock['stop_loss']:,}원  (절대 불변)\n"
-        f"📐 RR:        1 : {stock['rr_ratio']}\n"
+        f"📌 감시가:    {stock['entry_price']:,}원  (눌림 대기)\n"
+        f"🎯 눌림 목표: {int(stock['entry_price'] * 0.90):,}~{int(stock['entry_price'] * 0.97):,}원  (3~10% 눌림 구간)\n"
+        f"⚠️ 진입은 tracker가 눌림 조건 충족 시 자동 등록\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
     )
 
@@ -825,7 +872,6 @@ def format_discord_message(stock: dict, rank: int) -> str:
         msg += "\n\n📰 뉴스\n" + "\n".join(f"  • {n}" for n in stock["news"])
 
     msg += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
     return msg
 
 def main() -> None:
@@ -837,8 +883,9 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v3.1")
+    print(f"🚀 초기 수급 탐지 스캐너 v4.1")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
+    print(f"   하드컷: daily<{HARD_DAILY}% / RSI<{HARD_RSI} / 5day<{HARD_5DAY}%")
     print("=" * 50)
 
     print("\n📊 KOSPI 데이터 로딩 중...")
@@ -919,7 +966,7 @@ def main() -> None:
             stock["ai_analysis"] = ""
 
     save_results(results)
-    save_positions(top_results)
+    save_watchlist(top_results)
 
     for rank, stock in enumerate(top_results, start=1):
         message = format_discord_message(stock, rank)
