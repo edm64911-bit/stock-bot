@@ -61,7 +61,7 @@ MA5: {ma5:,.0f}원
 [이유] 2줄 이내로"""}]
                     }]
                 },
-                timeout=30,
+                timeout=8,
             )
             if resp.status_code == 429:
                 continue
@@ -69,8 +69,7 @@ MA5: {ma5:,.0f}원
             content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
             content = content.replace("```", "").replace("**", "").strip()
             return content
-        except Exception as e:
-            logging.error(f"눌림 AI 실패 [{name}]: {e}")
+        except Exception:
             continue
     return ""
 POSITION_FILE = "positions.json"
@@ -244,7 +243,7 @@ def check_pullback(pos: dict) -> None:
                 vol_ratio, fib_382, fib_618, ma5, days_after, cond_count
             )
 
-            if "진입 가능" not in ai_result:
+            if ai_result and "진입 가능" not in ai_result:
                 print(f"  ⏭ AI 눌림 아님: {name} → {ai_result[:40]}")
                 return
 
