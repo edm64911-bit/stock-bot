@@ -310,20 +310,16 @@ def load_investor_cache() -> dict:
             )
             if df is None or df.empty:
                 continue
-            # 컬럼명 동적 탐지
-        foreign_col     = next((c for c in df.columns if "외국인" in c), None)
-        institution_col = next((c for c in df.columns if "기관"   in c), None)
-        print(f"  수급 컬럼 탐지: 외국인={foreign_col}, 기관={institution_col}")
-
-        if not foreign_col or not institution_col:
-            print(f"  ⚠️ 수급 컬럼 없음. 실제 컬럼: {list(df.columns)}")
-            return {}
-
-        for ticker in df.index:
-            cache[ticker] = {
-                "foreign":     int(df.loc[ticker, foreign_col]),
-                "institution": int(df.loc[ticker, institution_col]),
-            }
+            foreign_col     = next((c for c in df.columns if "외국인" in c), None)
+            institution_col = next((c for c in df.columns if "기관"   in c), None)
+            if not foreign_col or not institution_col:
+                print(f"  ⚠️ [{market}] 수급 컬럼 없음. 실제 컬럼: {list(df.columns)}")
+                continue
+            for ticker in df.index:
+                cache[ticker] = {
+                    "foreign":     int(df.loc[ticker, foreign_col]),
+                    "institution": int(df.loc[ticker, institution_col]),
+                }
         print(f"  수급 캐시 로딩 완료: {len(cache)}개 종목")
         return cache
     except Exception as e:
@@ -723,7 +719,7 @@ def save_positions(top_results: list) -> None:
 
         existing_codes = {p["code"] for p in positions if p["status"] == "진행중"}
 
-       for stock in top_results:
+        for stock in top_results:
             if stock["code"] in existing_codes:
                 continue
             if "비추천" in stock.get("verdict", ""):
@@ -912,7 +908,7 @@ def main() -> None:
         send_discord_message(msg, WEBHOOK_STOCK)
         return
 
-     for stock in top_results:
+    for stock in top_results:
         verdict_info         = generate_verdict(stock)
         stock["verdict"]     = verdict_info["verdict"]
         stock["reasons"]     = verdict_info["reasons"]
