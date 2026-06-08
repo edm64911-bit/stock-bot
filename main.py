@@ -903,7 +903,15 @@ def main() -> None:
     investor_cache = load_investor_cache()
 
     print("\n📋 KRX 종목 로딩 중...")
-    all_stocks = fdr.StockListing("KRX")
+    try:
+        all_stocks = fdr.StockListing("KRX")
+    except Exception:
+        # fdr KRX 실패 시 KOSPI/KOSDAQ 개별 로딩
+        kospi  = fdr.StockListing("KOSPI")
+        kosdaq = fdr.StockListing("KOSDAQ")
+        kospi["Market"]  = "KOSPI"
+        kosdaq["Market"] = "KOSDAQ"
+        all_stocks = pd.concat([kospi, kosdaq], ignore_index=True)
     all_stocks = all_stocks[all_stocks["Market"].isin(["KOSPI", "KOSDAQ"])]
 
     target_stocks = []
