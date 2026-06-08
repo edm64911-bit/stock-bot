@@ -322,35 +322,18 @@ def load_investor_cache() -> dict:
             )
             if df is None or df.empty:
                 continue
-            print(f"  [{market}] 수급 컬럼: {list(df.columns)}")
-            print(df.head(2).to_string())
-            # 컬럼명 동적 탐지: 외국인합계 or 순매수거래량(합산) 순으로 시도
-            foreign_col     = next((c for c in df.columns if "외국인합계" in c), None) or                               next((c for c in df.columns if "외국인" in c), None)
-            institution_col = next((c for c in df.columns if "기관합계" in c), None) or                               next((c for c in df.columns if "기관" in c), None)
-            net_col         = next((c for c in df.columns if "순매수거래량" in c), None)
-
-            # 외국인/기관 컬럼 없으면 순매수거래량으로 대체
-            if not foreign_col and not institution_col and net_col:
-                for ticker in df.index:
-                    v = int(df.loc[ticker, net_col])
-                    if ticker not in cache:
-                        cache[ticker] = {"foreign": v, "institution": 0}
-                    else:
-                        cache[ticker]["foreign"] += v
+            # 순매수거래량 = 전체 시장 순매수 (외국인/기관 분리 불가)
+            # foreign에 전체 순매수, institution=0으로 처리
+            net_col = next((c for c in df.columns if "순매수거래량" in c), None)
+            if not net_col:
+                print(f"  ⚠️ [{market}] 순매수 컬럼 없음: {list(df.columns)}")
                 continue
-
-            if not foreign_col and not institution_col:
-                print(f"  ⚠️ [{market}] 수급 컬럼 없음. 실제 컬럼: {list(df.columns)}")
-                continue
-
             for ticker in df.index:
-                f = int(df.loc[ticker, foreign_col])     if foreign_col     else 0
-                i = int(df.loc[ticker, institution_col]) if institution_col else 0
+                v = int(df.loc[ticker, net_col])
                 if ticker not in cache:
-                    cache[ticker] = {"foreign": f, "institution": i}
+                    cache[ticker] = {"foreign": v, "institution": 0}
                 else:
-                    cache[ticker]["foreign"]     += f
-                    cache[ticker]["institution"] += i
+                    cache[ticker]["foreign"] += v
         print(f"  수급 캐시 로딩 완료: {len(cache)}개 종목")
         return cache
     except Exception as e:
@@ -940,13 +923,22 @@ def main() -> None:
             print("  ❌ 종목 리스트 로딩 완전 실패 — 종료")
             sys.exit(1)
         try:
-            mc_df = krx.get_market_cap(today_str, today_str)
+            # pykrx: 날짜 기준 전체 시총 조회
             mc_map = {}
-            if not mc_df.empty:
-                for t, row in mc_df.iterrows():
-                    mc_map[str(t)] = int(row.get("시가총액", 0))
+            for market in ["KOSPI", "KOSDAQ"]:
+                try:
+                    mc_df = krx.get_market_cap_by_ticker(today_str, market=market)
+                    if mc_df is not None and not mc_df.empty:
+                        col = next((c for c in mc_df.columns if "시가총액" in c), None)
+                        if col:
+                            for t, row in mc_df.iterrows():
+                                mc_map[str(t)] = int(row[col])
+                except Exception as e1:
+                    logging.error(f"pykrx 시총 [{market}] 실패: {e1}")
             for r in rows:
                 r["Marcap"] = mc_map.get(r["Code"], 0)
+            filled = sum(1 for r in rows if r["Marcap"] > 0)
+            print(f"  시총 조회: {filled}/{len(rows)}개")
         except Exception as e:
             logging.error(f"pykrx 시총 로딩 실패: {e}")
         all_stocks = pd.DataFrame(rows)
