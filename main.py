@@ -906,7 +906,6 @@ def main() -> None:
     try:
         all_stocks = fdr.StockListing("KRX")
     except Exception:
-        # fdr KRX 실패 시 KOSPI/KOSDAQ 개별 로딩
         kospi  = fdr.StockListing("KOSPI")
         kosdaq = fdr.StockListing("KOSDAQ")
         kospi["Market"]  = "KOSPI"
