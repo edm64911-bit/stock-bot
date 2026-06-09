@@ -1,4 +1,4 @@
-{
+[
   "code": "005930",
   "name": "삼성전자(테스트)",
   "entry_price": 100000,
@@ -11,4 +11,4 @@
   "verdict": "테스트",
   "remaining_ratio": 1.0,
   "entry_atr": 3000
-}
+]
