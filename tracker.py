@@ -355,6 +355,8 @@ def main() -> None:
     updated_active = [check_position(p) for p in active]
     positions      = updated_active + done
     save_json(POSITION_FILE, positions)
+    _verify = load_json(POSITION_FILE, [])
+    print(f"[DEBUG] SAVE VERIFY: {[p.get('status') for p in _verify]}")
 
     # --------------------------------------------------
     # 2. WATCH 만료 처리
