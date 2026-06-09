@@ -1,7 +1,7 @@
 name: Stock Bot
 on:
   schedule:
-    - cron: '30 0,1,2,3,4,5 * * 1-5'   # 평일 KST 09:30~15:30 매시간
+    - cron: '0 0,1,2,3,4,5 * * 1-5'   # 평일 KST 09:30~15:30 매시간
     - cron: '0 8 * * *'                  # 매일 KST 17시 장마감 후 정리
   workflow_dispatch:
 env:
