@@ -1,6 +1,6 @@
 """
 ===================================================
-  초기 수급 탐지 스캐너 v4.1
+  초기 수급 탐지 스캐너 v4.2
   변경사항 (v4.0 → v4.1):
     - RR 계산/필터 제거 (WATCH 구조에서 의미 없음)
     - stop_loss/target_price 계산 제거 (tracker에서 재계산)
@@ -503,6 +503,9 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         # ==================================================
         if change_pct >= HARD_DAILY or five_day_change >= HARD_5DAY:
             return None
+        # 음봉 + MA20 하단 = 추세 붕괴 하드컷
+        if change_pct < 0 and today_close < float(data["Close"].tail(20).mean()):
+            return None
 
         avg_volume   = data["Volume"].iloc[-11:-1].mean()
         if avg_volume <= 0:
@@ -573,9 +576,9 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
 
         relative_strength        = get_relative_strength(five_day_change, kospi_data)
         investor                 = get_investor_sentiment(code, investor_cache)
-        news_titles, detected_themes = analyze_news(name)
-        sector_bullish           = is_sector_etf_bullish(detected_themes, etf_cache)
-        event_news               = has_event_news(news_titles)
+        # 뉴스는 analyze_stock 밖에서 상위 30개만 조회
+        news_titles, detected_themes, event_news = [], [], False
+        sector_bullish = is_sector_etf_bullish(detected_themes, etf_cache)
 
         # ==================================================
         # 스코어링
@@ -603,7 +606,7 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         if trading_value > 10_000_000_000:  score += 3
         elif trading_value > 5_000_000_000: score += 1
 
-        score += len(detected_themes) * 2
+        # 뉴스 테마 점수 제거 (기술 스코어만 사용)
 
         if near_52w_high:          score += 3
         if vol_consolidation:      score += 2
@@ -632,7 +635,7 @@ def analyze_stock(row, kospi_data, etf_cache, investor_cache: dict, group_cfg: d
         if group_name == "소형" and volume_ratio >= 2.0:
             score += 2
 
-        if event_news:             score -= 2
+        # 이벤트 뉴스 패널티 제거
 
         if score < 3:
             return None
@@ -885,7 +888,7 @@ def main() -> None:
 
     start_time = time.time()
     print("=" * 50)
-    print(f"🚀 초기 수급 탐지 스캐너 v4.1")
+    print(f"🚀 초기 수급 탐지 스캐너 v4.2")
     print(f"   실행 시각: {TODAY.strftime('%Y-%m-%d %H:%M:%S')} KST")
     print(f"   하드컷: daily<{HARD_DAILY}% / RSI<{HARD_RSI} / 5day<{HARD_5DAY}%")
     print("=" * 50)
@@ -963,7 +966,7 @@ def main() -> None:
     print(f"  총 분석 대상: {len(combined)}개\n")
 
     results = []
-    with ThreadPoolExecutor(max_workers=15) as executor:
+    with ThreadPoolExecutor(max_workers=25) as executor:
         futures = {
             executor.submit(
                 analyze_stock,
@@ -996,15 +999,51 @@ def main() -> None:
         send_discord_message(msg, WEBHOOK_STOCK)
         return
 
+    # 뉴스 조회: 상위 min(30, len) 병렬
+    news_candidates = results[:min(30, len(results))]
+    print(f"  📰 뉴스 조회 중... ({len(news_candidates)}개 병렬)")
+
+    def _fetch_news(stock: dict) -> dict:
+        titles, themes = analyze_news(stock["name"])
+        stock["news"]        = titles
+        stock["themes"]      = themes
+        stock["event_news"]  = has_event_news(titles)
+        stock["sector_bullish"] = is_sector_etf_bullish(themes, etf_cache)
+        return stock
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        news_futures = {ex.submit(_fetch_news, s): s for s in news_candidates}
+        for f in as_completed(news_futures):
+            try:
+                f.result()
+            except Exception:
+                pass
+
+    # 뉴스 후 재정렬 없음 — 점수 기준 유지
+    top_results = results[:10]
+
     for stock in top_results:
         verdict_info         = generate_verdict(stock)
         stock["verdict"]     = verdict_info["verdict"]
         stock["reasons"]     = verdict_info["reasons"]
         stock["risks"]       = verdict_info["risks"]
+
+    # AI 분석 병렬
+    print(f"  🤖 AI 분석 중... ({len(top_results)}개 병렬)")
+    def _fetch_ai(stock: dict) -> dict:
         try:
             stock["ai_analysis"] = get_ai_analysis(stock)
         except Exception:
             stock["ai_analysis"] = ""
+        return stock
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        ai_futures = {ex.submit(_fetch_ai, s): s for s in top_results}
+        for f in as_completed(ai_futures):
+            try:
+                f.result()
+            except Exception:
+                pass
 
     save_results(results)
     save_watchlist(top_results)
